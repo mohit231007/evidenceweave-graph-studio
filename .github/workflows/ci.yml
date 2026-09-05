@@ -13,15 +13,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
         with:
           version: 10.15.1
           run_install: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 24
       - run: pnpm install --no-frozen-lockfile
+      - name: Capture resolved lockfile
+        uses: actions/upload-artifact@v7
+        with:
+          name: pnpm-lock-${{ github.sha }}
+          path: pnpm-lock.yaml
+          retention-days: 1
       - run: pnpm check
       - run: pnpm --filter @evidenceweave/web exec playwright install --with-deps chromium
       - run: pnpm --filter @evidenceweave/web test:e2e
