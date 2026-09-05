@@ -1,0 +1,14 @@
+{
+  "name": "evidenceweave-graph-studio",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.15.1",
+  "engines": {"node": ">=22.12"},
+  "scripts": {
+    "dev": "pnpm --filter @evidenceweave/web dev",
+    "build": "pnpm --filter @evidenceweave/web build",
+    "test": "pnpm --filter @evidenceweave/web test",
+    "typecheck": "pnpm --filter @evidenceweave/web typecheck",
+    "check": "pnpm typecheck && pnpm test && pnpm build"
+  }
+}
