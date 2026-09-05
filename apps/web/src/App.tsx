@@ -224,7 +224,7 @@ function App() {
     setView("evidence");
     setStatus(
       trace.evidence.length
-        ? `${trace.mode}: found ${trace.evidence.length} evidence matches with inspectable authored-path contributions.`
+        ? `${trace.mode}: found ${trace.evidence.length} block-level evidence matches with inspectable authored-path contributions.`
         : "Evidence gap: the local workspace does not support this query strongly enough."
     );
   };
@@ -302,7 +302,7 @@ function App() {
 
     <footer className="statusbar">
       <span>{status}</span>
-      <span>IndexedDB · authored graph · deterministic graph proof</span>
+      <span>IndexedDB · block provenance · authored graph · deterministic proof</span>
     </footer>
   </div>;
 }
@@ -548,10 +548,19 @@ function EvidenceView({
   trace?: GraphQueryTrace;
   onOpen: (id: string) => void;
 }) {
+  const exportTrace = () => {
+    if (!trace) return;
+    download(
+      `evidenceweave-trace-${trace.createdAt.replace(/[:.]/g, "-")}.json`,
+      JSON.stringify(trace, null, 2),
+      "application/json"
+    );
+  };
+
   return <div className="single-view evidence-view">
-    <span className="eyebrow">Deterministic graph proof · local</span>
+    <span className="eyebrow">Deterministic block + graph proof · local</span>
     <h1>Verify retrieval paths before generation.</h1>
-    <p className="lede">EvidenceWeave now routes between lexical, local-graph, and multi-hop authored-path retrieval. It still does not claim generative GraphRAG: the result below is the inspectable retrieval proof that a later synthesis layer must be constrained by.</p>
+    <p className="lede">EvidenceWeave routes between lexical, local-graph, and multi-hop authored-path retrieval, but factual support is now resolved to deterministic source blocks. The proof layer exposes exactly where the text came from before any future synthesis model is allowed to use it.</p>
     <div className="ask-box">
       <input
         value={query}
@@ -563,24 +572,35 @@ function EvidenceView({
     </div>
 
     {trace && <section className="trace-card">
-      <div className="trace-head"><span className={`route-badge ${trace.mode}`}>{trace.mode}</span><strong>{trace.anchors.length ? `Anchors: ${trace.anchors.map((anchor) => anchor.title).join(", ")}` : "No graph anchor"}</strong></div>
+      <div className="trace-head">
+        <span className={`route-badge ${trace.mode}`}>{trace.mode}</span>
+        <strong>{trace.anchors.length ? `Anchors: ${trace.anchors.map((anchor) => anchor.title).join(", ")}` : "No graph anchor"}</strong>
+        <button className="trace-export" onClick={exportTrace}>Download trace JSON</button>
+      </div>
       <p>{trace.reason}</p>
+      <div className="trace-version"><span>Retriever</span><code>{trace.retrievalVersion}</code><span>{new Date(trace.createdAt).toLocaleString()}</span></div>
       {trace.paths.length > 0 && <div className="path-list">{trace.paths.map((path, index) => <div className="path-chip" key={`${path.nodeIds.join("-")}-${index}`}><span>{path.titles.join(" → ")}</span><small>{path.hops} hop{path.hops === 1 ? "" : "s"}</small></div>)}</div>}
     </section>}
 
     <div className="evidence-list">
-      {trace?.evidence.map((hit, index) => <article className="evidence-card" key={hit.noteId}>
+      {trace?.evidence.map((hit, index) => <article className="evidence-card" key={hit.id}>
         <div className="evidence-head">
           <span>S{index + 1}</span>
           <button onClick={() => onOpen(hit.noteId)}>{hit.title}</button>
           <strong>{Math.round(hit.retrievalScore * 100)}%</strong>
         </div>
+        <div className="source-meta">
+          <code title="Deterministic source block ID">{hit.id}</code>
+          <span>{hit.headingPath.length ? hit.headingPath.join(" / ") : "Root"}</span>
+          <span>chars {hit.startOffset}–{hit.endOffset}</span>
+          <span>lexical support {Math.round(hit.weightedCoverage * 100)}%</span>
+        </div>
         <p>{hit.excerpt}</p>
         <small>Matched: {hit.matchedTerms.join(", ") || "graph anchor"}</small>
         {hit.graphPath && hit.graphPath.hops > 0 && <div className="evidence-path"><b>Authored path</b><span>{hit.graphPath.titles.join(" → ")}</span></div>}
       </article>)}
-      {!trace && <div className="empty-evidence">Run a query to inspect the local retrieval plan and graph proof.</div>}
-      {trace && !trace.evidence.length && <div className="empty-evidence">Evidence gap: no source note crossed the deterministic support threshold. Existing graph paths alone are not treated as proof of the requested fact.</div>}
+      {!trace && <div className="empty-evidence">Run a query to inspect the block-level retrieval plan and graph proof.</div>}
+      {trace && !trace.evidence.length && <div className="empty-evidence">Evidence gap: no source block crossed the deterministic support threshold. Existing graph paths alone are not treated as proof of the requested fact.</div>}
     </div>
   </div>;
 }
