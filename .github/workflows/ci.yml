@@ -21,13 +21,9 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
-      - run: pnpm install --no-frozen-lockfile
-      - name: Capture resolved lockfile
-        uses: actions/upload-artifact@v7
-        with:
-          name: pnpm-lock-${{ github.sha }}
-          path: pnpm-lock.yaml
-          retention-days: 1
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
       - run: pnpm check
       - run: pnpm --filter @evidenceweave/web exec playwright install --with-deps chromium
       - run: pnpm --filter @evidenceweave/web test:e2e
