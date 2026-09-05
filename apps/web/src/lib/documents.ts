@@ -396,7 +396,34 @@ export async function ingestBytes(name: string, mimeType: string, buffer: ArrayB
 
 export async function ingestFile(file: File, options: DocumentIngestOptions = {}): Promise<DocumentImportBundle> {
   throwIfAborted(options.signal);
-  return ingestBytes(file.name, file.type || "application/octet-stream", await file.arrayBuffer(), options);
+  if (typeof Worker === "undefined") return ingestBytes(file.name, file.type || "application/octet-stream", await file.arrayBuffer(), options);
+  const buffer = await file.arrayBuffer();
+  throwIfAborted(options.signal);
+  const jobId = crypto.randomUUID();
+  return new Promise<DocumentImportBundle>((resolve, reject) => {
+    const worker = new Worker(new URL("./document-import.worker.ts", import.meta.url), { type: "module", name: `evidenceweave-import-${jobId}` });
+    let settled = false;
+    const cleanup = () => {
+      worker.terminate();
+      options.signal?.removeEventListener("abort", onAbort);
+    };
+    const finish = (callback: () => void) => { if (settled) return; settled = true; cleanup(); callback(); };
+    const onAbort = () => {
+      worker.postMessage({ type: "cancel", jobId });
+      finish(() => reject(new DOMException("Document import cancelled.", "AbortError")));
+    };
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    worker.onmessage = (event: MessageEvent<{ type: string; jobId: string; progress?: DocumentImportProgress; bundle?: DocumentImportBundle; error?: string }>) => {
+      const message = event.data;
+      if (message.jobId !== jobId) return;
+      if (message.type === "progress" && message.progress) { options.onProgress?.(message.progress); return; }
+      if (message.type === "complete" && message.bundle) { finish(() => resolve(message.bundle!)); return; }
+      if (message.type === "cancelled") { finish(() => reject(new DOMException("Document import cancelled.", "AbortError"))); return; }
+      if (message.type === "error") finish(() => reject(new Error(message.error || "Document import failed.")));
+    };
+    worker.onerror = (event) => finish(() => reject(new Error(event.message || "Document import worker failed.")));
+    worker.postMessage({ type: "start", jobId, name: file.name, mimeType: file.type || "application/octet-stream", buffer }, [buffer]);
+  });
 }
 
 export function formatLocation(location: SourceLocation): string {

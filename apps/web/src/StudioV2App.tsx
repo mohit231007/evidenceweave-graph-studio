@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import WorkspaceTools from "./WorkspaceTools";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
 import {
@@ -34,6 +35,8 @@ import {
   setEntityPinned,
   splitEntity
 } from "./lib/review";
+import { undoReviewAudit } from "./lib/review-undo";
+import { loadWorkspaceState, saveWorkspaceState, touchRecentNote } from "./lib/workspace-state";
 import {
   knowledgeDb,
   type CanvasRecord,
@@ -158,8 +161,17 @@ export default function StudioV2App() {
   };
 
   useEffect(() => {
-    void seedIfEmpty().then(() => refresh());
+    void seedIfEmpty().then(async () => {
+      const saved = await loadWorkspaceState();
+      await refresh(saved.activeNoteId);
+      const validViews: MainView[] = ["workspace", "documents", "graph", "review", "evidence", "canvas", "library"];
+      if (validViews.includes(saved.activeView as MainView)) setView(saved.activeView as MainView);
+    });
   }, []);
+
+  useEffect(() => {
+    void saveWorkspaceState({ activeView: view, activeNoteId: selectedId || undefined });
+  }, [view, selectedId]);
 
   const selected = notes.find((note) => note.id === selectedId);
   const authoredGraph = useMemo(() => buildAuthoredGraph(notes), [notes]);
@@ -352,6 +364,16 @@ export default function StudioV2App() {
     setStatus(`Split one evidence observation from “${entity.canonicalName}” into pending entity “${desired}”.`);
   };
 
+  const undoAuditAction = async (auditId: string) => {
+    try {
+      await undoReviewAudit(auditId);
+      await refresh();
+      setStatus("Reversed the selected review mutation from its audited before-snapshot.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Audit undo failed.");
+    }
+  };
+
   const enableSemantic = async () => {
     try {
       setSemanticState("loading");
@@ -418,7 +440,7 @@ export default function StudioV2App() {
 
   const exportAll = async () => {
     const bundle = await exportPortableWorkspace(notes);
-    download(`evidenceweave-v2-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(bundle, null, 2));
+    download(`evidenceweave-v3-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(bundle, null, 2));
   };
 
   const restoreAll = async (file?: File) => {
@@ -427,7 +449,7 @@ export default function StudioV2App() {
       const bundle = validatePortableWorkspace(JSON.parse(await file.text()));
       await restorePortableWorkspace(bundle);
       await refresh(bundle.notes[0]?.id);
-      setStatus(`Restored portable v2 workspace: ${bundle.notes.length} notes, ${bundle.documents.length} documents, ${bundle.reviewAudit.length} audit events and ${bundle.queryTraces.length} query traces. Semantic vectors will rebuild locally as needed.`);
+      setStatus(`Restored portable v3 workspace: ${bundle.notes.length} notes, ${bundle.documents.length} documents, ${bundle.reviewAudit.length} audit events and ${bundle.queryTraces.length} query traces. Semantic vectors will rebuild locally as needed.`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Restore failed.");
     }
@@ -437,6 +459,7 @@ export default function StudioV2App() {
     if (!notes.some((note) => note.id === id)) return;
     setSelectedId(id);
     setView("workspace");
+    void loadWorkspaceState().then((current) => knowledgeDb.workspaceState.put(touchRecentNote(current, id)));
   };
 
   return (
@@ -469,11 +492,12 @@ export default function StudioV2App() {
             </button>
           ))}
         </div>
+        <WorkspaceTools notes={notes} createNote={createNote} openNote={openNote} onChanged={refresh} />
         <div className="sidebar-footer">
           <label className="file-action">Import knowledge<input hidden type="file" multiple accept=".md,.txt,.csv,.html,.htm,.pdf,.docx,text/*,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={(event) => void importKnowledge(event.target.files)} /></label>
           <button className="file-action" onClick={() => void snapshot()}>Create snapshot</button>
-          <button className="file-action" onClick={() => void exportAll()}>Export portable v2</button>
-          <label className="file-action">Restore portable v1/v2<input hidden type="file" accept=".json,application/json" onChange={(event) => void restoreAll(event.target.files?.[0])} /></label>
+          <button className="file-action" onClick={() => void exportAll()}>Export portable v3</button>
+          <label className="file-action">Restore portable v1/v2/v3<input hidden type="file" accept=".json,application/json" onChange={(event) => void restoreAll(event.target.files?.[0])} /></label>
         </div>
       </aside>
 
@@ -481,7 +505,7 @@ export default function StudioV2App() {
         {view === "workspace" && <WorkspaceView note={selected} notes={notes} graph={authoredGraph} mode={mode} setMode={setMode} save={saveSelected} rename={renameSelected} remove={trashSelected} openNote={openNote} />}
         {view === "documents" && <DocumentsView documents={documents} blocks={blocks} importKnowledge={importKnowledge} />}
         {view === "graph" && <GraphStudio graph={authoredGraph} entities={entities} relations={relations} onOpen={openNote} />}
-        {view === "review" && <ReviewView entities={entities} relations={relations} blocks={sources} audit={reviewAudit} rebuild={rebuildCandidates} reviewEntity={reviewEntity} reviewRelation={reviewRelation} renameEntity={renameReviewedEntity} togglePin={togglePin} mergeEntity={mergeReviewedEntity} splitEntity={splitReviewedEntity} />}
+        {view === "review" && <ReviewView entities={entities} relations={relations} blocks={sources} audit={reviewAudit} rebuild={rebuildCandidates} reviewEntity={reviewEntity} reviewRelation={reviewRelation} renameEntity={renameReviewedEntity} togglePin={togglePin} mergeEntity={mergeReviewedEntity} splitEntity={splitReviewedEntity} undoAudit={undoAuditAction} />}
         {view === "evidence" && <EvidenceStudio question={question} setQuestion={setQuestion} evidence={evidence} trace={trace} verified={verified} entities={entities} sources={sources} semanticState={semanticState} semanticProgress={semanticProgress} enableSemantic={enableSemantic} runEvidence={runEvidence} runLocalLlm={runLocalLlm} llmProgress={llmProgress} />}
         {view === "canvas" && <CanvasStudio canvases={canvases} notes={notes} selected={selected} refresh={refresh} />}
         {view === "library" && <LibraryStudio notes={notes} graph={authoredGraph} documents={documents} entities={entities} relations={relations} views={views} trash={trash} snapshots={snapshots} queryTraces={queryTraces} reviewAudit={reviewAudit} restoreTrash={restoreTrash} restoreSnapshot={restoreSnapshot} openNote={openNote} refresh={refresh} />}
@@ -622,7 +646,7 @@ function GraphStudio({ graph, entities, relations, onOpen }: {
   );
 }
 
-function ReviewView({ entities, relations, blocks, audit, rebuild, reviewEntity, reviewRelation, renameEntity: renameEntityAction, togglePin, mergeEntity, splitEntity: splitEntityAction }: {
+function ReviewView({ entities, relations, blocks, audit, rebuild, reviewEntity, reviewRelation, renameEntity: renameEntityAction, togglePin, mergeEntity, splitEntity: splitEntityAction, undoAudit }: {
   entities: EntityCandidateRecord[];
   relations: RelationCandidateRecord[];
   blocks: UnifiedSourceBlock[];
@@ -634,6 +658,7 @@ function ReviewView({ entities, relations, blocks, audit, rebuild, reviewEntity,
   togglePin: (entity: EntityCandidateRecord) => Promise<void>;
   mergeEntity: (entity: EntityCandidateRecord) => Promise<void>;
   splitEntity: (entity: EntityCandidateRecord) => Promise<void>;
+  undoAudit: (id: string) => Promise<void>;
 }) {
   const [scope, setScope] = useState<"pending" | "reviewed">("pending");
   const visibleEntities = entities.filter((item) => !item.mergedIntoId && (scope === "pending" ? item.status === "pending" : item.status !== "pending"));
@@ -674,7 +699,7 @@ function ReviewView({ entities, relations, blocks, audit, rebuild, reviewEntity,
             </article>
           ))}
           <h2>Recent audit <span>{audit.length}</span></h2>
-          <div className="audit-list">{audit.slice(0, 20).map((item) => <div className="audit-row" key={item.id}><strong>{item.action}</strong><span>{item.targetKind} · {item.targetId.slice(0, 28)}</span><time>{new Date(item.createdAt).toLocaleString()}</time></div>)}</div>
+          <div className="audit-list">{audit.slice(0, 20).map((item) => <div className="audit-row" key={item.id}><strong>{item.action}</strong><span>{item.targetKind} · {item.targetId.slice(0, 28)}</span><time>{new Date(item.createdAt).toLocaleString()}</time>{item.action !== "undo" && item.beforeJson && <button onClick={() => void undoAudit(item.id)}>Undo</button>}</div>)}</div>
         </section>
       </div>
     </div>
