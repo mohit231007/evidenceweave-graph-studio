@@ -526,7 +526,7 @@ export default function StudioV2App() {
     <div className="app-shell v1-shell v2-shell">
       <header className="topbar">
         <div className="brand-mark">EW</div>
-        <div className="brand-copy"><strong>EvidenceWeave</strong><span>Graph Studio v1.0</span></div>
+        <div className="brand-copy"><strong>EvidenceWeave</strong><span>Graph Studio v1.1</span></div>
         <nav className="view-tabs" aria-label="Primary views">
           {(["workspace", "documents", "graph", "review", "evidence", "canvas", "library"] as MainView[]).map((item) => (
             <button key={item} className={view === item ? "active" : ""} onClick={() => setView(item)}>
