@@ -1,0 +1,62 @@
+name: Review AI patch
+
+on:
+  push:
+    branches: [feat/v1-completion-hardening]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: feat/v1-completion-hardening
+      - name: Wire opt-in local NER and semantic suggestions
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('apps/web/src/StudioV2App.tsx')
+          text = p.read_text()
+          def rep(old, new):
+              global text
+              if old not in text: raise SystemExit(f'missing marker: {old[:100]!r}')
+              text = text.replace(old, new, 1)
+
+          rep('import { undoReviewAudit } from "./lib/review-undo";\n', 'import { undoReviewAudit } from "./lib/review-undo";\nimport { createLocalNerProvider, extractLocalModelEntityCandidates, type LocalNerProvider } from "./lib/local-ner";\nimport { buildSemanticLinkSuggestions, reviewSemanticLink } from "./lib/semantic-links";\n')
+          rep('  type ReviewAuditRecord,\n  type SavedViewRecord,', '  type ReviewAuditRecord,\n  type SavedViewRecord,\n  type SemanticLinkSuggestionRecord,')
+          rep('  const [queryTraces, setQueryTraces] = useState<QueryTraceRecord[]>([]);\n', '  const [queryTraces, setQueryTraces] = useState<QueryTraceRecord[]>([]);\n  const [semanticSuggestions, setSemanticSuggestions] = useState<SemanticLinkSuggestionRecord[]>([]);\n')
+          rep('  const semanticProvider = useRef<EmbeddingProvider | undefined>(undefined);\n', '  const semanticProvider = useRef<EmbeddingProvider | undefined>(undefined);\n  const localNerProvider = useRef<LocalNerProvider | undefined>(undefined);\n')
+          rep('      nextAudit,\n      nextTraces\n    ] = await Promise.all([', '      nextAudit,\n      nextTraces,\n      nextSemanticSuggestions\n    ] = await Promise.all([')
+          rep('      knowledgeDb.queryTraces.orderBy("createdAt").reverse().toArray()\n    ]);', '      knowledgeDb.queryTraces.orderBy("createdAt").reverse().toArray(),\n      knowledgeDb.semanticSuggestions.orderBy("updatedAt").reverse().toArray()\n    ]);')
+          rep('    setQueryTraces(nextTraces);\n', '    setQueryTraces(nextTraces);\n    setSemanticSuggestions(nextSemanticSuggestions);\n')
+
+          marker = '''  const reviewEntity = async (entity: EntityCandidateRecord, accepted: boolean) => {\n'''
+          insert = '''  const runLocalNer = async () => {\n    try {\n      setStatus("Loading optional local NER model. First use downloads model files; all inference stays in this browser.");\n      localNerProvider.current ??= await createLocalNerProvider();\n      const provider = localNerProvider.current;\n      const previousByKey = new Map(entities.map((entity) => [`${entity.entityType}:${entity.normalizedName}`, entity]));\n      const modelCandidates = await extractLocalModelEntityCandidates(sources, provider, {\n        onProgress: (completed, total) => setStatus(`Local NER ${completed}/${total} source blocks…`)\n      });\n      const candidates = modelCandidates.flatMap((candidate) => {\n        const key = `${candidate.entityType}:${candidate.normalizedName}`;\n        const previous = previousByKey.get(key);\n        if (previous && !previous.extractorVersion.startsWith("local-ner:")) return [];\n        return [reconcileEntityReview(previous, candidate)];\n      });\n      if (candidates.length) await knowledgeDb.entities.bulkPut(candidates);\n      await refresh();\n      setView("review");\n      setStatus(`Optional local NER proposed ${candidates.length} additional pending candidate${candidates.length === 1 ? "" : "s"}; deterministic candidates remain authoritative until review.`);\n    } catch (error) {\n      setStatus(error instanceof Error ? error.message : "Local NER failed.");\n    }\n  };\n\n  const buildSemanticSuggestions = async () => {\n    try {\n      if (!semanticProvider.current) {\n        setSemanticState("loading");\n        setStatus("Loading the pinned local embedding model before semantic-link analysis…");\n        semanticProvider.current = await createTransformersProvider();\n        setSemanticState("ready");\n      }\n      const suggestions = await buildSemanticLinkSuggestions(entities, semanticProvider.current);\n      await refresh();\n      setView("review");\n      setStatus(`Generated ${suggestions.length} separate semantic-link suggestion${suggestions.length === 1 ? "" : "s"}. No authored or inferred graph edge was mutated.`);\n    } catch (error) {\n      setSemanticState("failed");\n      setStatus(error instanceof Error ? error.message : "Semantic-link analysis failed.");\n    }\n  };\n\n  const reviewSemanticSuggestion = async (id: string, accepted: boolean) => {\n    await reviewSemanticLink(id, accepted ? "accepted" : "rejected");\n    await refresh();\n  };\n\n'''
+          rep(marker, insert + marker)
+
+          rep('  useEffect(() => {\n    void saveWorkspaceState({ activeView: view, activeNoteId: selectedId || undefined });\n  }, [view, selectedId]);\n', '  useEffect(() => {\n    void saveWorkspaceState({ activeView: view, activeNoteId: selectedId || undefined });\n  }, [view, selectedId]);\n\n  useEffect(() => () => {\n    semanticProvider.current?.dispose?.();\n    localNerProvider.current?.dispose?.();\n  }, []);\n')
+
+          old_call = 'splitEntity={splitReviewedEntity} undoAudit={undoAuditAction} />'
+          new_call = 'splitEntity={splitReviewedEntity} undoAudit={undoAuditAction} runLocalNer={runLocalNer} buildSemanticSuggestions={buildSemanticSuggestions} semanticSuggestions={semanticSuggestions} reviewSemanticSuggestion={reviewSemanticSuggestion} />'
+          rep(old_call, new_call)
+
+          rep('function ReviewView({ entities, relations, blocks, audit, rebuild, reviewEntity, reviewRelation, renameEntity: renameEntityAction, togglePin, mergeEntity, splitEntity: splitEntityAction, undoAudit }: {', 'function ReviewView({ entities, relations, blocks, audit, rebuild, reviewEntity, reviewRelation, renameEntity: renameEntityAction, togglePin, mergeEntity, splitEntity: splitEntityAction, undoAudit, runLocalNer, buildSemanticSuggestions, semanticSuggestions, reviewSemanticSuggestion }: {')
+          rep('  undoAudit: (id: string) => Promise<void>;\n}) {', '  undoAudit: (id: string) => Promise<void>;\n  runLocalNer: () => Promise<void>;\n  buildSemanticSuggestions: () => Promise<void>;\n  semanticSuggestions: SemanticLinkSuggestionRecord[];\n  reviewSemanticSuggestion: (id: string, accepted: boolean) => Promise<void>;\n}) {')
+          rep('<button className="primary" onClick={() => void rebuild()}>Rebuild candidates</button>', '<div className="review-actions wrap-actions"><button className="primary" onClick={() => void rebuild()}>Rebuild deterministic</button><button onClick={() => void runLocalNer()}>Optional local NER</button><button onClick={() => void buildSemanticSuggestions()}>Suggest semantic links</button></div>')
+
+          old = '''          <h2>Recent audit <span>{audit.length}</span></h2>\n          <div className="audit-list">'''
+          new = '''          <h2>Semantic suggestions <span>{semanticSuggestions.length}</span></h2>\n          {semanticSuggestions.slice(0, 30).map((suggestion) => <article className="review-card" key={suggestion.id}><div><strong>{entityMap.get(suggestion.sourceEntityId)?.canonicalName ?? suggestion.sourceEntityId}</strong><small> ⇄ semantic · {Math.round(suggestion.score * 100)}% ⇄ </small><strong>{entityMap.get(suggestion.targetEntityId)?.canonicalName ?? suggestion.targetEntityId}</strong></div><p>{suggestion.status} · {suggestion.modelId}</p>{suggestion.status === "pending" && <div className="review-actions"><button onClick={() => void reviewSemanticSuggestion(suggestion.id, true)}>Accept suggestion</button><button onClick={() => void reviewSemanticSuggestion(suggestion.id, false)}>Reject suggestion</button></div>}</article>)}\n          <h2>Recent audit <span>{audit.length}</span></h2>\n          <div className="audit-list">'''
+          rep(old, new)
+          p.write_text(text)
+          PY
+      - name: Commit review intelligence wiring
+        run: |
+          if git diff --quiet; then exit 0; fi
+          git config user.name "EvidenceWeave CI"
+          git config user.email "actions@users.noreply.github.com"
+          git add apps/web/src/StudioV2App.tsx
+          git commit -m "feat: expose opt-in local NER and separate semantic link review"
+          git push origin HEAD:feat/v1-completion-hardening
