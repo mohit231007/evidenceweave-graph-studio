@@ -7,9 +7,9 @@ import { dailyNoteTitle, expandTemplate, moveCanvasNode } from "./workspace";
 import { evaluateRetrieval, pathRecall } from "./eval";
 
 const blocks: UnifiedSourceBlock[] = [
-  { id: "b1", sourceType: "document", sourceId: "d1", title: "Project", headingPath: ["Architecture"], text: "EvidenceWeave uses IndexedDB for local storage and GraphRAG for retrieval." },
-  { id: "b2", sourceType: "document", sourceId: "d1", title: "Project", headingPath: ["Company"], text: "Microsoft acquired GitHub in 2018." },
-  { id: "b3", sourceType: "document", sourceId: "d2", title: "Noise", headingPath: [], text: "Oranges and bicycles are unrelated." }
+  { id: "b1", sourceType: "document", sourceId: "d1", title: "Project", headingPath: ["Architecture"], text: "EvidenceWeave uses IndexedDB for local storage and GraphRAG for retrieval.", mentionedYears: [] },
+  { id: "b2", sourceType: "document", sourceId: "d1", title: "Project", headingPath: ["Company"], text: "Microsoft acquired GitHub in 2018.", mentionedYears: [2018] },
+  { id: "b3", sourceType: "document", sourceId: "d2", title: "Noise", headingPath: [], text: "Oranges and bicycles are unrelated.", mentionedYears: [] }
 ];
 
 describe("document ingestion", () => {
