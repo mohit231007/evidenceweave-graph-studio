@@ -208,6 +208,8 @@ export default function StudioV2App() {
       updatedAt: now
     };
     await db.notes.add(note);
+    const workspaceState = touchRecentNote(await loadWorkspaceState(), id);
+    await knowledgeDb.workspaceState.put({ ...workspaceState, activeView: "workspace" });
     await refresh(id);
     setView("workspace");
     setMode("edit");
@@ -219,6 +221,8 @@ export default function StudioV2App() {
     if (existing) {
       setSelectedId(existing.id);
       setView("workspace");
+      const workspaceState = touchRecentNote(await loadWorkspaceState(), existing.id);
+      await knowledgeDb.workspaceState.put({ ...workspaceState, activeView: "workspace" });
       return;
     }
     const body = expandTemplate(

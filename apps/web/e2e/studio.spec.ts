@@ -34,7 +34,7 @@ test("imports structured evidence in a worker, audits review, and produces a per
   await expect(page.getByText("acquisition.txt", { exact: true })).toBeVisible();
 
   await navButton(page, "Review").click();
-  await page.getByRole("button", { name: "Rebuild candidates", exact: true }).click();
+  await page.getByRole("button", { name: "Rebuild deterministic", exact: true }).click();
   await expect(page.getByText("Inference proposes. You decide.", { exact: true })).toBeVisible();
   const firstAccept = page.getByRole("button", { name: "Accept", exact: true }).first();
   await expect(firstAccept).toBeVisible();
@@ -42,7 +42,12 @@ test("imports structured evidence in a worker, audits review, and produces a per
   await page.getByRole("button", { name: "Reviewed", exact: true }).click();
   await expect(page.locator(".review-card").first()).toContainText("accepted");
   await expect(page.locator(".audit-row").first()).toContainText("accept");
-  await expect(page.locator(".audit-row").first().getByRole("button", { name: "Undo", exact: true })).toBeVisible();
+  const undo = page.locator(".audit-row").first().getByRole("button", { name: "Undo", exact: true });
+  await expect(undo).toBeVisible();
+  await undo.click();
+  await expect(page.locator(".audit-row").first()).toContainText("undo");
+  await page.getByRole("button", { name: "Pending", exact: true }).click();
+  await expect(page.locator(".review-card").first()).toContainText("pending");
 
   await navButton(page, "Evidence").click();
   await page.getByLabel("Evidence question").fill("What evidence supports provenance?");
