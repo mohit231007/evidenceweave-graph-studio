@@ -1,0 +1,50 @@
+name: Import queue UI patch
+
+on:
+  push:
+    branches: [feat/v1-completion-hardening]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: feat/v1-completion-hardening
+      - name: Expose cancellable resumable import jobs
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('apps/web/src/StudioV2App.tsx')
+          text = p.read_text()
+          def rep(old, new):
+              global text
+              if old not in text: raise SystemExit(f'missing marker: {old[:100]!r}')
+              text = text.replace(old, new, 1)
+
+          rep('import { formatLocation, ingestFile } from "./lib/documents";\n', 'import { formatLocation, type DocumentImportBundle } from "./lib/documents";\nimport { createDocumentImportJob, type DocumentImportJob, type DocumentImportJobSnapshot } from "./lib/document-jobs";\n')
+          rep('  const [llmProgress, setLlmProgress] = useState("");\n', '  const [llmProgress, setLlmProgress] = useState("");\n  const [importJob, setImportJob] = useState<DocumentImportJobSnapshot>();\n')
+          rep('  const localNerProvider = useRef<LocalNerProvider | undefined>(undefined);\n', '  const localNerProvider = useRef<LocalNerProvider | undefined>(undefined);\n  const activeImportJob = useRef<DocumentImportJob | undefined>(undefined);\n')
+
+          start = text.index('  const importKnowledge = async (fileList: FileList | null) => {')
+          end = text.index('\n\n  const rebuildCandidates = async () => {', start)
+          old = text[start:end]
+          new = '''  const commitImportedBundle = async (bundle: DocumentImportBundle): Promise<"imported" | "duplicate"> => {\n    const duplicate = await knowledgeDb.documents.where("sha256").equals(bundle.document.sha256).first();\n    if (duplicate) return "duplicate";\n    await knowledgeDb.transaction("rw", [knowledgeDb.documents, knowledgeDb.blocks], async () => {\n      await knowledgeDb.documents.put(bundle.document);\n      await knowledgeDb.blocks.bulkPut(bundle.blocks);\n    });\n    return "imported";\n  };\n\n  const importKnowledge = async (fileList: FileList | null) => {\n    if (!fileList) return;\n    let imported = 0;\n    let duplicates = 0;\n    let cancelled = 0;\n    const failures: string[] = [];\n    for (const file of Array.from(fileList)) {\n      const job = createDocumentImportJob(file);\n      activeImportJob.current = job;\n      const unsubscribe = job.subscribe(setImportJob);\n      try {\n        const bundle = await job.start();\n        const outcome = await commitImportedBundle(bundle);\n        if (outcome === "duplicate") duplicates += 1;\n        else imported += 1;\n      } catch (error) {\n        if (error instanceof DOMException && error.name === "AbortError") {\n          cancelled += 1;\n          break;\n        }\n        failures.push(`${file.name}: ${error instanceof Error ? error.message : "failed"}`);\n      } finally {\n        unsubscribe();\n      }\n    }\n    await refresh();\n    setView("documents");\n    setStatus(`Imported ${imported} document${imported === 1 ? "" : "s"}; ${duplicates} duplicate${duplicates === 1 ? "" : "s"} skipped${cancelled ? `; ${cancelled} cancelled and resumable` : ""}${failures.length ? `; ${failures.length} failed` : ""}.`);\n  };\n\n  const cancelImport = () => {\n    activeImportJob.current?.cancel();\n    setImportJob(activeImportJob.current?.snapshot);\n    setStatus("Cancelled document extraction before database commit. Resume restarts safely from the retained local File object.");\n  };\n\n  const resumeImport = async () => {\n    const job = activeImportJob.current;\n    if (!job || !["cancelled", "failed"].includes(job.snapshot.status)) return;\n    const unsubscribe = job.subscribe(setImportJob);\n    try {\n      const bundle = await job.resume();\n      const outcome = await commitImportedBundle(bundle);\n      await refresh();\n      setView("documents");\n      setStatus(outcome === "duplicate" ? `Resumed ${bundle.document.name}; duplicate skipped.` : `Resumed and imported ${bundle.document.name} without partial prior state.`);\n    } catch (error) {\n      setStatus(error instanceof Error ? error.message : "Resumed import failed.");\n    } finally {\n      unsubscribe();\n      setImportJob(job.snapshot);\n    }\n  };'''
+          text = text[:start] + new + text[end:]
+
+          rep('{view === "documents" && <DocumentsView documents={documents} blocks={blocks} importKnowledge={importKnowledge} />}', '{view === "documents" && <DocumentsView documents={documents} blocks={blocks} importKnowledge={importKnowledge} importJob={importJob} cancelImport={cancelImport} resumeImport={resumeImport} />}')
+          rep('function DocumentsView({ documents, blocks, importKnowledge }: {\n  documents: SourceDocumentRecord[];\n  blocks: DocumentBlockRecord[];\n  importKnowledge: (files: FileList | null) => Promise<void>;\n}) {', 'function DocumentsView({ documents, blocks, importKnowledge, importJob, cancelImport, resumeImport }: {\n  documents: SourceDocumentRecord[];\n  blocks: DocumentBlockRecord[];\n  importKnowledge: (files: FileList | null) => Promise<void>;\n  importJob?: DocumentImportJobSnapshot;\n  cancelImport: () => void;\n  resumeImport: () => Promise<void>;\n}) {')
+          rep('      <label className="primary import-hero">Import PDF / DOCX / CSV / HTML / text<input hidden type="file" multiple accept=".md,.txt,.csv,.html,.htm,.pdf,.docx" onChange={(event) => void importKnowledge(event.target.files)} /></label>\n      <div className="document-grid">', '      <label className="primary import-hero">Import PDF / DOCX / CSV / HTML / text<input hidden type="file" multiple accept=".md,.txt,.csv,.html,.htm,.pdf,.docx" onChange={(event) => void importKnowledge(event.target.files)} /></label>\n      {importJob && <div className="import-job panel" aria-live="polite"><strong>{importJob.fileName}</strong><span>{importJob.status}{importJob.progress ? ` · ${importJob.progress.phase} ${importJob.progress.completed}/${importJob.progress.total}` : ""}</span>{importJob.progress?.detail && <small>{importJob.progress.detail}</small>}<div className="review-actions">{importJob.status === "running" && <button onClick={cancelImport}>Cancel import</button>}{(importJob.status === "cancelled" || importJob.status === "failed") && <button onClick={() => void resumeImport()}>Resume import</button>}</div></div>}\n      <div className="document-grid">')
+          p.write_text(text)
+          PY
+      - name: Commit import job UI
+        run: |
+          if git diff --quiet; then exit 0; fi
+          git config user.name "EvidenceWeave CI"
+          git config user.email "actions@users.noreply.github.com"
+          git add apps/web/src/StudioV2App.tsx
+          git commit -m "feat: expose cancellable resumable document import jobs"
+          git push origin HEAD:feat/v1-completion-hardening
