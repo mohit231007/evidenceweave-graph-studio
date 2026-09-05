@@ -42,7 +42,7 @@ function yearInConstraint(year: number, constraint: TemporalConstraint): boolean
 }
 
 export function blockMatchesTemporal(block: UnifiedSourceBlock, constraint: TemporalConstraint): boolean {
-  if (block.mentionedYears.some((year) => yearInConstraint(year, constraint))) return true;
+  if ((block.mentionedYears ?? []).some((year) => yearInConstraint(year, constraint))) return true;
   const metadataYears = [block.createdAt, block.updatedAt]
     .filter((value): value is string => Boolean(value))
     .map((value) => new Date(value).getUTCFullYear())
