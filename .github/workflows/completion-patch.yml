@@ -1,0 +1,38 @@
+name: Completion compatibility patch
+
+on:
+  push:
+    branches: [feat/v1-completion-hardening]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: feat/v1-completion-hardening
+      - name: Preserve public helper compatibility
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          hybrid = Path('apps/web/src/lib/hybrid.ts')
+          text = hybrid.read_text()
+          text = text.replace('  mentionedYears: number[];\n', '  mentionedYears?: number[];\n', 1)
+          hybrid.write_text(text)
+
+          reasoning = Path('apps/web/src/lib/reasoning.ts')
+          text = reasoning.read_text()
+          text = text.replace('  reason: string;\n', '  reason?: string;\n', 1)
+          reasoning.write_text(text)
+          PY
+      - name: Commit compatibility patch
+        run: |
+          if git diff --quiet; then exit 0; fi
+          git config user.name "EvidenceWeave CI"
+          git config user.email "actions@users.noreply.github.com"
+          git add apps/web/src/lib/hybrid.ts apps/web/src/lib/reasoning.ts
+          git commit -m "fix: preserve source block and temporal helper compatibility"
+          git push origin HEAD:feat/v1-completion-hardening
