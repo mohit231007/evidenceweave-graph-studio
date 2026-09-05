@@ -5,7 +5,7 @@ export type QueryMode = "exact" | "local" | "multi-hop" | "global" | "temporal";
 export interface TemporalConstraint {
   fromYear?: number;
   toYear?: number;
-  reason: string;
+  reason?: string;
 }
 
 export interface QueryRoute {

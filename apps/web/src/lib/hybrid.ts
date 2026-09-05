@@ -17,7 +17,7 @@ export interface UnifiedSourceBlock {
   bounds?: SourceBounds[];
   createdAt?: string;
   updatedAt?: string;
-  mentionedYears: number[];
+  mentionedYears?: number[];
 }
 
 export interface RankedEvidence {
