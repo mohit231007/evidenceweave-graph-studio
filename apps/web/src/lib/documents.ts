@@ -21,9 +21,9 @@ export async function sha256Hex(value: string | Uint8Array | ArrayBuffer): Promi
   const bytes = typeof value === "string"
     ? new TextEncoder().encode(value)
     : value instanceof Uint8Array
-      ? value
-      : new Uint8Array(value);
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
+      ? Uint8Array.from(value)
+      : new Uint8Array(value.slice(0));
+  const digest = await crypto.subtle.digest("SHA-256", bytes.buffer);
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
@@ -186,10 +186,10 @@ async function ingestPdf(document: SourceDocumentRecord, bytes: Uint8Array): Pro
   const pdfjs = await import("pdfjs-dist");
   const workerModule = await import("pdfjs-dist/build/pdf.worker.mjs?worker");
   if (!pdfjs.GlobalWorkerOptions.workerPort) pdfjs.GlobalWorkerOptions.workerPort = new workerModule.default();
-  const task = pdfjs.getDocument({ data: bytes, isEvalSupported: false });
+  const task = pdfjs.getDocument({ data: bytes });
   const pdf = await task.promise;
   if (pdf.numPages > MAX_PDF_PAGES) {
-    await pdf.destroy();
+    await task.destroy();
     throw new Error(`PDF exceeds the ${MAX_PDF_PAGES.toLocaleString()} page safety limit.`);
   }
   const blocks: DocumentBlockRecord[] = [];
@@ -202,7 +202,7 @@ async function ingestPdf(document: SourceDocumentRecord, bytes: Uint8Array): Pro
     }
     page.cleanup();
   }
-  await pdf.destroy();
+  await task.destroy();
   return blocks;
 }
 

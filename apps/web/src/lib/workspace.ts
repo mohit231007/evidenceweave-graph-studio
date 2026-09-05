@@ -37,7 +37,7 @@ export function dailyNoteTitle(date: Date, prefix = "Daily"): string {
 export function expandTemplate(template: string, date = new Date(), variables: Record<string, string> = {}): string {
   const dateValue = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
   const timeValue = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
-  const values = { date: dateValue, time: timeValue, ...variables };
+  const values: Record<string, string> = { date: dateValue, time: timeValue, ...variables };
   return template.replace(/\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}/g, (match, key: string) => values[key] ?? match);
 }
 
