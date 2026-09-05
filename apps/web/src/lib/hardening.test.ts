@@ -16,12 +16,24 @@ describe("proof validation", () => {
   });
 });
 
-describe("portable v2", () => {
-  it("upgrades a v1 bundle and deliberately rebuilds vectors", () => {
+describe("portable v3", () => {
+  it("upgrades a v1 bundle, initializes v3 state, and deliberately rebuilds vectors", () => {
     const bundle = validatePortableWorkspace({ schemaVersion: 1, exportedAt: "x", notes: [], documents: [], blocks: [], entities: [], relations: [], canvases: [], views: [], trash: [], snapshots: [] });
-    expect(bundle.schemaVersion).toBe(2);
+    expect(bundle.schemaVersion).toBe(3);
     expect(bundle.embeddingPolicy).toBe("rebuild-on-device");
     expect(bundle.reviewAudit).toEqual([]);
+    expect(bundle.queryTraces).toEqual([]);
+    expect(bundle.templates).toEqual([]);
+    expect(bundle.workspaceState).toEqual([]);
+    expect(bundle.migrations).toEqual([]);
+    expect(bundle.semanticSuggestions).toEqual([]);
+  });
+
+  it("accepts portable v2 and initializes only new v3 collections", () => {
+    const bundle = validatePortableWorkspace({ schemaVersion: 2, exportedAt: "x", embeddingPolicy: "rebuild-on-device", notes: [], documents: [], blocks: [], entities: [], relations: [], canvases: [], views: [], trash: [], snapshots: [], reviewAudit: [], queryTraces: [] });
+    expect(bundle.schemaVersion).toBe(3);
+    expect(bundle.templates).toEqual([]);
+    expect(bundle.semanticSuggestions).toEqual([]);
   });
 
   it("rejects orphan inferred relations", () => {
