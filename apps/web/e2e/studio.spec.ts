@@ -3,6 +3,29 @@ import { expect, test, type Page } from "@playwright/test";
 const navButton = (page: Page, name: string) =>
   page.getByRole("navigation", { name: "Primary views" }).getByRole("button", { name, exact: true });
 
+function minimalPdf(text: string): Buffer {
+  const escaped = text.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
+  const stream = `BT\n/F1 18 Tf\n72 720 Td\n(${escaped}) Tj\nET\n`;
+  const objects = [
+    "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+    "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+    "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>\nendobj\n",
+    `4 0 obj\n<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}endstream\nendobj\n`,
+    "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n"
+  ];
+  let pdf = "%PDF-1.4\n";
+  const offsets: number[] = [];
+  for (const object of objects) {
+    offsets.push(Buffer.byteLength(pdf));
+    pdf += object;
+  }
+  const xrefOffset = Buffer.byteLength(pdf);
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  for (const offset of offsets) pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+  return Buffer.from(pdf);
+}
+
 test.beforeEach(async ({ page }) => {
   await page.goto("/");
   await expect(page.getByText("EvidenceWeave", { exact: true })).toBeVisible();
@@ -59,6 +82,28 @@ test("imports structured evidence in a worker, audits review, and produces a per
 
   await navButton(page, "Library").click();
   await expect(page.locator(".trace-list-row")).toHaveCount(1);
+});
+
+test("PDF import preserves page-level browser provenance", async ({ page }) => {
+  const input = page.locator('aside.sidebar input[type="file"]').first();
+  await input.setInputFiles({
+    name: "browser-proof.pdf",
+    mimeType: "application/pdf",
+    buffer: minimalPdf("EvidenceWeave PDF provenance proof")
+  });
+  await navButton(page, "Documents").click();
+  const card = page.locator(".document-card").filter({ hasText: "browser-proof.pdf" });
+  await expect(card).toBeVisible({ timeout: 15_000 });
+  await expect(card.locator(".source-mini").first()).toContainText("page 1");
+  await expect(card.locator(".source-mini").first()).toContainText("EvidenceWeave PDF provenance proof");
+});
+
+test("unsupported document input fails closed without creating a source record", async ({ page }) => {
+  const input = page.locator('aside.sidebar input[type="file"]').first();
+  await input.setInputFiles({ name: "unsafe.exe", mimeType: "application/octet-stream", buffer: Buffer.from([0, 1, 2, 3]) });
+  await expect(page.locator(".statusbar")).toContainText("1 failed");
+  await navButton(page, "Documents").click();
+  await expect(page.getByText("unsafe.exe", { exact: true })).toHaveCount(0);
 });
 
 test("canvas supports labels, edges and grouping and graph renders without a backend", async ({ page }) => {
