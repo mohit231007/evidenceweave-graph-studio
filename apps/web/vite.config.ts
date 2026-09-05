@@ -18,7 +18,20 @@ export default defineConfig({
       },
       workbox: {
         navigateFallback: "/index.html",
-        globPatterns: ["**/*.{js,css,html,svg,png,ico}"]
+        // The application shell is small and always available offline. Heavy document,
+        // embedding and WebLLM chunks are optional capabilities: cache them on first
+        // use rather than forcing every PWA install to download tens of MiB.
+        globPatterns: ["**/*.{css,html,svg,png,ico}", "assets/index-*.js", "assets/cytoscape.esm-*.js"],
+        runtimeCaching: [
+          {
+            urlPattern: /\/assets\/.*\.(?:js|wasm)$/,
+            handler: "CacheFirst",
+            options: {
+              cacheName: "evidenceweave-lazy-runtime-v1",
+              expiration: { maxEntries: 40, maxAgeSeconds: 60 * 60 * 24 * 30 }
+            }
+          }
+        ]
       }
     })
   ]
