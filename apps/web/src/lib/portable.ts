@@ -23,12 +23,13 @@ export interface PortableWorkspaceV2 extends Omit<PortableWorkspaceV1, "schemaVe
 }
 
 export type PortableWorkspace = PortableWorkspaceV1 | PortableWorkspaceV2;
+type PortableCandidate = Partial<Omit<PortableWorkspaceV2, "schemaVersion">> & { schemaVersion?: number; reviewAudit?: ReviewAuditRecord[]; queryTraces?: QueryTraceRecord[] };
 
 const requiredArrays = ["notes", "documents", "blocks", "entities", "relations", "canvases", "views", "trash", "snapshots"] as const;
 
 export function validatePortableWorkspace(value: unknown): PortableWorkspaceV2 {
   if (!value || typeof value !== "object") throw new Error("Workspace bundle must be an object.");
-  const candidate = value as Partial<PortableWorkspaceV2> & { schemaVersion?: number; reviewAudit?: ReviewAuditRecord[]; queryTraces?: QueryTraceRecord[] };
+  const candidate = value as PortableCandidate;
   if (candidate.schemaVersion !== 1 && candidate.schemaVersion !== 2) throw new Error("Unsupported EvidenceWeave workspace schema.");
   for (const key of requiredArrays) if (!Array.isArray(candidate[key])) throw new Error(`Workspace bundle is missing ${key}.`);
   const ids = new Set<string>();
