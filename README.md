@@ -4,7 +4,7 @@
 
 EvidenceWeave is a local-first knowledge graph and GraphRAG workspace that runs in your browser. The product is being built from the non-AI core outward: user-owned Markdown, deterministic links/backlinks, an inspectable authored graph, portable exports, and a universal extractive evidence path before optional local generation is added.
 
-> **Current status — Foundation v0.1:** real browser workspace, local persistence, Markdown/TXT import, portable JSON export/restore, typed frontmatter inspection, wiki-link parsing, backlinks, unresolved-link visibility, global authored graph, local search, deterministic evidence retrieval, and offline-PWA scaffolding. Full document ingestion, inferred entities, hybrid vector/graph retrieval, Canvas, local WebLLM generation, and claim/path validation are roadmap items—not shipped claims.
+> **Current status — Knowledge Foundation v0.2:** real browser workspace, local persistence, Markdown/TXT import, portable JSON export/restore, typed frontmatter inspection, wiki links, backlinks, unlinked mentions, global/local authored graph exploration, property-library view, deterministic lexical/local/multi-hop query planning, graph-path proof, and offline-PWA scaffolding. Full document ingestion, inferred entity review, vector embeddings, Canvas, local WebLLM generation, and claim-level generated-answer validation are still roadmap items—not shipped claims.
 
 ## Product principles
 
@@ -13,30 +13,52 @@ EvidenceWeave is a local-first knowledge graph and GraphRAG workspace that runs 
 - **Open knowledge:** Markdown remains the source format and the workspace can be exported.
 - **Graph before GraphRAG:** authored relationships and graph invariants are established before inferred knowledge is trusted.
 - **Evidence before generation:** deterministic evidence search remains the compatibility fallback even after local generation arrives.
-- **Visible gaps:** unresolved links and weak retrieval are shown rather than silently invented.
+- **Visible gaps:** unresolved links, ambiguous titles, weak retrieval, and missing paths are shown rather than silently invented.
+- **Explain graph contribution:** graph boosts are accompanied by the exact authored path that produced them.
 - **Clean-room implementation:** inspired by general knowledge-work patterns, not copied from Obsidian or any other proprietary product.
 
 ## What works now
 
-| Capability | Foundation status |
+| Capability | Current status |
 |---|---|
 | Local Markdown notes | ✅ IndexedDB persistence |
+| Safe note rename | ✅ Inbound wiki links rewritten transactionally |
 | Wiki links | ✅ `[[Note]]`, aliases, heading targets |
 | Typed properties | ✅ Lightweight YAML frontmatter inspection |
+| Property library | ✅ Derived table over frontmatter, tags, links, backlinks |
 | Tags | ✅ Local parsing and display |
 | Backlinks | ✅ Derived from authored links |
+| Unlinked mentions | ✅ Plain-text mentions separated from authored links |
 | Global graph | ✅ Cytoscape.js, unresolved targets included |
+| Local graph | ✅ Selected-note neighborhood with depth 1–3 |
 | Full-text note filter | ✅ Local substring search |
-| Evidence mode | ✅ Deterministic term scoring + source excerpts |
-| Import | ✅ Markdown and TXT |
-| Export/restore | ✅ Versioned JSON workspace |
+| Evidence mode | ✅ Deterministic source excerpts with support threshold |
+| Query routing | ✅ Lexical / local-graph / multi-hop authored-path modes |
+| Graph proof | ✅ Bounded shortest paths over resolved authored edges |
+| Import | ✅ Markdown and TXT with size bounds |
+| Export/restore | ✅ Versioned validated JSON workspace |
 | PWA shell | ✅ Static/offline scaffolding |
 | PDF/DOCX/CSV document graph | ⏳ Planned |
 | Entity/relationship review queue | ⏳ Planned |
 | BM25 + vector + graph RRF | ⏳ Planned |
-| GraphRAG answer proof | ⏳ Planned |
-| Canvas / database views | ⏳ Planned |
+| Generated GraphRAG answer synthesis | ⏳ Planned after retrieval/provenance gates |
+| Canvas | ⏳ Planned |
 | Local WebLLM | ⏳ Optional later layer |
+
+## How graph proof works today
+
+EvidenceWeave does **not** label deterministic retrieval as generated GraphRAG. The current query planner:
+
+1. Finds note titles explicitly named in the question.
+2. Routes two-or-more named notes to **multi-hop** mode.
+3. Otherwise uses the current note as a **local-graph** anchor when available.
+4. Falls back to **lexical** evidence retrieval when no graph anchor exists.
+5. Searches source notes with a fail-closed lexical support threshold.
+6. Computes bounded shortest paths only over resolved, authored edges.
+7. Applies a small graph-path ranking contribution and displays the exact path beside the evidence.
+8. Refuses to treat a graph path by itself as proof of a factual claim when no source note crosses the evidence threshold.
+
+This creates the proof layer that later BM25/vector/community retrieval and optional local generation must obey rather than bypass.
 
 ## Run locally
 
