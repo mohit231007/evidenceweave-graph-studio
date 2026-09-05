@@ -40,6 +40,20 @@ export async function reviewRelation(record: RelationCandidateRecord, nextStatus
   return updated;
 }
 
+export async function setRelationValidity(record: RelationCandidateRecord, validFrom?: string, validTo?: string): Promise<RelationCandidateRecord> {
+  const cleanFrom = validFrom?.trim() || undefined;
+  const cleanTo = validTo?.trim() || undefined;
+  if (cleanFrom && Number.isNaN(Date.parse(cleanFrom))) throw new Error("validFrom must be an ISO-compatible date.");
+  if (cleanTo && Number.isNaN(Date.parse(cleanTo))) throw new Error("validTo must be an ISO-compatible date.");
+  if (cleanFrom && cleanTo && Date.parse(cleanFrom) > Date.parse(cleanTo)) throw new Error("validFrom cannot be after validTo.");
+  const updated: RelationCandidateRecord = { ...record, validFrom: cleanFrom, validTo: cleanTo, updatedAt: now() };
+  await knowledgeDb.transaction("rw", [knowledgeDb.relations, knowledgeDb.reviewAudit], async () => {
+    await knowledgeDb.relations.put(updated);
+    await knowledgeDb.reviewAudit.add(auditFor(record, "relation", "edit-validity", record.status, updated.status, JSON.stringify(record), JSON.stringify(updated)));
+  });
+  return updated;
+}
+
 export async function renameEntity(record: EntityCandidateRecord, canonicalName: string): Promise<EntityCandidateRecord> {
   const name = canonicalName.trim();
   if (!name) throw new Error("Entity name cannot be empty.");
