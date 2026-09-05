@@ -1,8 +1,8 @@
 import type { EntityCandidateRecord, RelationCandidateRecord } from "./store";
 import type { UnifiedSourceBlock } from "./hybrid";
 
-export const ENTITY_EXTRACTOR_VERSION = "deterministic-entity-v1";
-export const RELATION_EXTRACTOR_VERSION = "deterministic-relation-v1";
+export const ENTITY_EXTRACTOR_VERSION = "deterministic-entity-v2";
+export const RELATION_EXTRACTOR_VERSION = "deterministic-relation-v2";
 
 const normalize = (value: string) => value.trim().toLocaleLowerCase().replace(/\s+/g, " ");
 const idFor = (prefix: string, value: string) => `${prefix}-${normalize(value).replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-|-$/g, "").slice(0, 80)}`;
@@ -21,9 +21,16 @@ function candidatesInText(text: string): RawCandidate[] {
     if (/ISBN/i.test(match[0])) candidates.push({ name: match[0], type: "identifier", confidence: 0.96 });
   }
   for (const match of text.matchAll(/\b(?:19|20)\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])\b/g)) candidates.push({ name: match[0], type: "date", confidence: 0.98 });
+
+  // Multi-token proper-name candidates receive a stronger prior than single-token
+  // candidates. All remain pending until a user accepts them.
   for (const match of text.matchAll(/\b(?:[A-Z][\p{L}\p{N}&.-]+(?:\s+|$)){2,5}/gu)) {
     const name = match[0].trim();
-    if (name.length >= 5 && name.length <= 100) candidates.push({ name, type: "topic", confidence: 0.62 });
+    if (name.length >= 5 && name.length <= 100) candidates.push({ name, type: "topic", confidence: 0.66 });
+  }
+  for (const match of text.matchAll(/\b[A-Z][\p{L}\p{N}&.-]{2,}\b/gu)) {
+    const name = match[0].trim();
+    if (name.length <= 80 && !/^https?$/i.test(name) && !/^isbn$/i.test(name)) candidates.push({ name, type: "topic", confidence: 0.56 });
   }
   return candidates;
 }
@@ -66,7 +73,7 @@ function relationVerb(text: string, left: string, right: string): { relation: st
   const between = lower.slice(a + left.length, b).slice(0, 120);
   const patterns: [RegExp, string, number][] = [
     [/\bacquir(?:ed|es|ing)\b/, "acquired", 0.93],
-    [/\bpartner(?:ed|s|ing)?\s+(?:with)?\b/, "partnered-with", 0.88],
+    [/\bpartner(?:ed|s|ing)?\s*(?:with)?\b/, "partnered-with", 0.88],
     [/\buses?\b/, "uses", 0.84],
     [/\bdepends?\s+on\b/, "depends-on", 0.88],
     [/\bworks?\s+(?:at|for)\b/, "works-at", 0.82],
@@ -89,7 +96,12 @@ export function extractRelationCandidates(blocks: UnifiedSourceBlock[], entities
     }
   }
   for (const block of blocks) {
-    const candidates = (entityByBlock.get(block.id) ?? []).filter((entity) => entity.entityType !== "url" && entity.entityType !== "identifier").slice(0, 12);
+    const textLower = block.text.toLocaleLowerCase();
+    const candidates = (entityByBlock.get(block.id) ?? [])
+      .filter((entity) => entity.entityType !== "url" && entity.entityType !== "identifier")
+      .filter((entity) => textLower.includes(entity.canonicalName.toLocaleLowerCase()))
+      .sort((left, right) => textLower.indexOf(left.canonicalName.toLocaleLowerCase()) - textLower.indexOf(right.canonicalName.toLocaleLowerCase()) || right.canonicalName.length - left.canonicalName.length)
+      .slice(0, 12);
     for (let left = 0; left < candidates.length; left += 1) {
       for (let right = left + 1; right < candidates.length; right += 1) {
         const relation = relationVerb(block.text, candidates[left].canonicalName, candidates[right].canonicalName);
