@@ -1,6 +1,6 @@
 /// <reference lib="webworker" />
 
-interface InitMessage { type: "init"; modelId: string; }
+interface InitMessage { type: "init"; modelId: string; revision: string; }
 interface EmbedMessage { type: "embed"; requestId: string; texts: string[]; }
 interface CancelMessage { type: "cancel"; requestId: string; }
 type WorkerInput = InitMessage | EmbedMessage | CancelMessage;
@@ -8,12 +8,12 @@ type WorkerInput = InitMessage | EmbedMessage | CancelMessage;
 let extractor: ((text: string, options: { pooling: string; normalize: boolean }) => Promise<{ tolist(): unknown }>) | undefined;
 const cancelled = new Set<string>();
 
-async function initialize(modelId: string) {
+async function initialize(modelId: string, revision: string) {
   try {
     const { pipeline } = await import("@huggingface/transformers");
     const supportsWebGpu = typeof navigator !== "undefined" && "gpu" in navigator;
-    extractor = await pipeline("feature-extraction", modelId, { device: supportsWebGpu ? "webgpu" : "wasm", dtype: "q8" }) as unknown as typeof extractor;
-    self.postMessage({ type: "ready", device: supportsWebGpu ? "webgpu" : "wasm" });
+    extractor = await pipeline("feature-extraction", modelId, { device: supportsWebGpu ? "webgpu" : "wasm", dtype: "q8", revision }) as unknown as typeof extractor;
+    self.postMessage({ type: "ready", device: supportsWebGpu ? "webgpu" : "wasm", modelId, revision });
   } catch (error) {
     self.postMessage({ type: "error", error: error instanceof Error ? error.message : "Embedding worker initialization failed." });
   }
@@ -42,7 +42,7 @@ async function embed(requestId: string, texts: string[]) {
 
 self.addEventListener("message", (event: MessageEvent<WorkerInput>) => {
   const message = event.data;
-  if (message.type === "init") { void initialize(message.modelId); return; }
+  if (message.type === "init") { void initialize(message.modelId, message.revision); return; }
   if (message.type === "cancel") { cancelled.add(message.requestId); return; }
   void embed(message.requestId, message.texts);
 });
