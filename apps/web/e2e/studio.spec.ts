@@ -12,12 +12,16 @@ test("note authoring, daily notes, trash and recovery survive the studio workflo
   await editor.fill("# Browser Smoke\n\nEvidenceWeave keeps local evidence and [[GraphRAG]].");
   await page.getByRole("button", { name: "Daily" }).click();
   await expect(page.locator(".document-header h1")).toContainText("Daily ");
-  await page.getByRole("button", { name: "Trash" }).click();
   page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Trash" }).click();
+  await page.getByRole("button", { name: "Library" }).click();
+  await expect(page.getByRole("button", { name: "Restore" })).toBeVisible();
+  await page.getByRole("button", { name: "Restore" }).click();
+  await expect(page.getByText(/Daily \d{4}-\d{2}-\d{2}/).first()).toBeVisible();
 });
 
 test("imports structured evidence and exposes review and retrieval surfaces", async ({ page }) => {
-  const input = page.locator('input[type="file"]').first();
+  const input = page.locator('aside.sidebar input[type="file"]').first();
   await input.setInputFiles({ name: "people.csv", mimeType: "text/csv", buffer: Buffer.from("name,role\nAda Lovelace,Researcher\nGrace Hopper,Engineer") });
   await page.getByRole("button", { name: "Documents" }).click();
   await expect(page.getByText("people.csv", { exact: true })).toBeVisible();

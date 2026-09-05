@@ -45,7 +45,7 @@ export async function exportPortableWorkspace(notes: NoteRecord[]): Promise<Port
 export async function restorePortableWorkspace(bundle: PortableWorkspaceV1): Promise<void> {
   await Promise.all([
     db.transaction("rw", db.notes, async () => { await db.notes.clear(); await db.notes.bulkPut(bundle.notes); }),
-    knowledgeDb.transaction("rw", knowledgeDb.documents, knowledgeDb.blocks, knowledgeDb.entities, knowledgeDb.relations, knowledgeDb.canvases, knowledgeDb.views, knowledgeDb.trash, knowledgeDb.snapshots, async () => {
+    knowledgeDb.transaction("rw", [knowledgeDb.documents, knowledgeDb.blocks, knowledgeDb.entities, knowledgeDb.relations, knowledgeDb.canvases, knowledgeDb.views, knowledgeDb.trash, knowledgeDb.snapshots], async () => {
       await Promise.all([
         knowledgeDb.documents.clear(), knowledgeDb.blocks.clear(), knowledgeDb.entities.clear(), knowledgeDb.relations.clear(), knowledgeDb.canvases.clear(), knowledgeDb.views.clear(), knowledgeDb.trash.clear(), knowledgeDb.snapshots.clear()
       ]);
