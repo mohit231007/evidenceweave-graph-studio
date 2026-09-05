@@ -23,7 +23,7 @@ test("note authoring, daily notes, trash and recovery survive the studio workflo
   await expect(page.getByText(/Daily \d{4}-\d{2}-\d{2}/).first()).toBeVisible();
 });
 
-test("imports structured evidence, audits review, and produces a persisted routed trace", async ({ page }) => {
+test("imports structured evidence in a worker, audits review, and produces a persisted routed trace", async ({ page }) => {
   const input = page.locator('aside.sidebar input[type="file"]').first();
   await input.setInputFiles({
     name: "acquisition.txt",
@@ -42,6 +42,7 @@ test("imports structured evidence, audits review, and produces a persisted route
   await page.getByRole("button", { name: "Reviewed", exact: true }).click();
   await expect(page.locator(".review-card").first()).toContainText("accepted");
   await expect(page.locator(".audit-row").first()).toContainText("accept");
+  await expect(page.locator(".audit-row").first().getByRole("button", { name: "Undo", exact: true })).toBeVisible();
 
   await navButton(page, "Evidence").click();
   await page.getByLabel("Evidence question").fill("What evidence supports provenance?");
@@ -91,4 +92,23 @@ test("saved Kanban views and note snapshots remain local and recoverable", async
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "Restore snapshot", exact: true }).click();
   await expect(page.getByText("Temporary Browser Note", { exact: true })).toHaveCount(0);
+});
+
+test("calendar, user templates and recent workspace state survive a browser reload", async ({ page }) => {
+  await page.getByLabel("Daily note date").fill("2026-09-06");
+  await page.getByRole("button", { name: "Create daily note", exact: true }).click();
+  await expect(page.locator(".document-header h1")).toHaveText("Daily 2026-09-06");
+
+  const promptAnswers = ["Research template", "---\ntype: research\n---\n# {{title}}\n\n## Evidence\n"];
+  page.on("dialog", async (dialog) => {
+    if (dialog.type() === "prompt") await dialog.accept(promptAnswers.shift() ?? "");
+  });
+  await page.getByRole("button", { name: "New template", exact: true }).click();
+  await expect(page.getByLabel("Daily note template")).toContainText("Research template");
+  page.removeAllListeners("dialog");
+
+  await page.reload();
+  await expect(page.locator(".document-header h1")).toHaveText("Daily 2026-09-06");
+  await expect(page.getByLabel("Daily note template")).toContainText("Research template");
+  await expect(page.locator(".workspace-tools")).toContainText("Daily 2026-09-06");
 });
