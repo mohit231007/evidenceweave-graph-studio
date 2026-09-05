@@ -2,7 +2,11 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
 
+const base = process.env.VITE_BASE_PATH || "/";
+const normalizedBase = base.endsWith("/") ? base : `${base}/`;
+
 export default defineConfig({
+  base: normalizedBase,
   plugins: [
     react(),
     VitePWA({
@@ -14,10 +18,11 @@ export default defineConfig({
         theme_color: "#101319",
         background_color: "#0b0e13",
         display: "standalone",
-        start_url: "/"
+        scope: normalizedBase,
+        start_url: normalizedBase
       },
       workbox: {
-        navigateFallback: "/index.html",
+        navigateFallback: `${normalizedBase}index.html`,
         // The application shell is small and always available offline. Heavy document,
         // embedding and WebLLM chunks are optional capabilities: cache them on first
         // use rather than forcing every PWA install to download tens of MiB.
@@ -27,8 +32,8 @@ export default defineConfig({
             urlPattern: /\/assets\/.*\.(?:js|wasm)$/,
             handler: "CacheFirst",
             options: {
-              cacheName: "evidenceweave-lazy-runtime-v1",
-              expiration: { maxEntries: 40, maxAgeSeconds: 60 * 60 * 24 * 30 }
+              cacheName: "evidenceweave-lazy-runtime-v2",
+              expiration: { maxEntries: 50, maxAgeSeconds: 60 * 60 * 24 * 30 }
             }
           }
         ]
