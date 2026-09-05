@@ -1,0 +1,65 @@
+name: Release docs patch
+
+on:
+  push:
+    branches: [feat/v1-completion-hardening]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: feat/v1-completion-hardening
+      - name: Refresh v1.1 product claims
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          readme = Path('README.md')
+          text = readme.read_text()
+          replacements = {
+            '**Current status — v1 release candidate:**': '**Current status — v1.1 completion release candidate:**',
+            'portable workspace v2, PWA support': 'portable workspace v3, calendar/user-template/recent-note state, worker-safe imports, reversible review, PWA support',
+            'Workspace v2 exports notes, documents, blocks, reviewed knowledge, Canvas data, saved views, recovery data, audit history, and query traces.': 'Workspace v3 exports notes, documents, blocks, reviewed knowledge, Canvas data, saved views, templates, workspace layout/recent state, migration records, semantic-link suggestions, recovery data, audit history, and query traces.',
+            '| Daily notes + templates | ✅ |': '| Daily notes + templates | ✅ Calendar navigation, built-in/user templates, persisted open/recent note state |',
+            '| PDF import | ✅ Page-level text provenance |': '| PDF import | ✅ Page-level text plus extracted source-region bounds where PDF text geometry is available |',
+            '| Entity candidates | ✅ Deterministic candidates, pending by default |': '| Entity candidates | ✅ Deterministic baseline plus opt-in pinned local NER; all model proposals remain pending |',
+            '| Human review | ✅ Accept/reject plus audit history |': '| Human review | ✅ Accept/reject plus reversible audit history |',
+            '| BM25 | ✅ Proper local BM25 channel |': '| BM25 | ✅ Reusable inverted index plus versioned/cancellable rebuild path |',
+            '| Local semantic retrieval | ✅ Optional Transformers.js embeddings |': '| Local semantic retrieval | ✅ Optional pinned Transformers.js model, dedicated worker, WebGPU→WASM fallback |',
+            '| Graph retrieval | ✅ Reviewed relation/evidence expansion |': '| Graph retrieval | ✅ Reviewed relation/evidence expansion plus broad-intent community retrieval |',
+            '| Portable workspace | ✅ v2 export/restore; v1 migration supported |': '| Portable workspace | ✅ v3 export/restore; v1/v2 migration supported; vectors rebuild on-device |',
+            '| Browser smoke tests | ✅ Chromium authoring/import/review/retrieval/Canvas/graph flows |': '| Browser smoke tests | ✅ Chromium authoring/import/review/retrieval/Canvas/graph/calendar/template/reload flows |',
+            '- PDF provenance is page/text based; it does not yet preserve bounding-box coordinates for every glyph/region.': '- PDF provenance preserves page identity and extracted text-item bounds where available; it is not a pixel-perfect archival reproduction of every glyph.',
+            '- The browser app does not yet provide cryptographic model-file integrity pinning.': '- Optional model repositories are pinned to explicit revisions, but EvidenceWeave does not yet independently verify every downloaded model shard against a repository-maintained cryptographic allow-list.',
+            '- [`docs/privacy.md`](docs/privacy.md)': '- [`docs/privacy.md`](docs/privacy.md)\n- [`docs/model-runtime.md`](docs/model-runtime.md)'
+          }
+          for old, new in replacements.items():
+            if old not in text: raise SystemExit(f'missing README marker: {old}')
+            text = text.replace(old, new, 1)
+          if '| Semantic-link suggestions |' not in text:
+            marker = '| Entity operations | ✅ Rename, aliases, pin, merge, split |\n'
+            if marker not in text: raise SystemExit('semantic table insertion marker missing')
+            text = text.replace(marker, marker + '| Semantic-link suggestions | ✅ Separate opt-in embedding-derived layer with accept/reject state; never silently becomes an authored edge |\n', 1)
+          if '| Workspace state |' not in text:
+            marker = '| Snapshots | ✅ Manual note snapshots and restore |\n'
+            if marker not in text: raise SystemExit('workspace state table insertion marker missing')
+            text = text.replace(marker, marker + '| Workspace state | ✅ Persisted active view/note, open tabs, recent notes, templates and migration records |\n', 1)
+          readme.write_text(text)
+
+          app = Path('apps/web/src/StudioV2App.tsx')
+          text = app.read_text()
+          if '<span>Graph Studio v1.0</span>' not in text: raise SystemExit('Studio version marker missing')
+          app.write_text(text.replace('<span>Graph Studio v1.0</span>', '<span>Graph Studio v1.1</span>', 1))
+          PY
+      - name: Commit release docs
+        run: |
+          if git diff --quiet; then exit 0; fi
+          git config user.name "EvidenceWeave CI"
+          git config user.email "actions@users.noreply.github.com"
+          git add README.md apps/web/src/StudioV2App.tsx
+          git commit -m "docs: align README and Studio branding with v1.1 completion release"
+          git push origin HEAD:feat/v1-completion-hardening
