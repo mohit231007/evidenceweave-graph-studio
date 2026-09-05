@@ -1,6 +1,6 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
-const navButton = (page: Parameters<typeof test>[0] extends never ? never : any, name: string) =>
+const navButton = (page: Page, name: string) =>
   page.getByRole("navigation", { name: "Primary views" }).getByRole("button", { name, exact: true });
 
 test.beforeEach(async ({ page }) => {
