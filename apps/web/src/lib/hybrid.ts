@@ -49,6 +49,8 @@ export interface Bm25Index {
 }
 
 export const HYBRID_RETRIEVAL_VERSION = "bm25-inverted+vector-worker+graph-rrf-v2";
+export const DEFAULT_EMBEDDING_MODEL_ID = "Xenova/all-MiniLM-L6-v2";
+export const DEFAULT_EMBEDDING_MODEL_REVISION = "751bff37182d3f1213fa05d7196b954e230abad9";
 
 const mentionedYears = (text: string) => [...new Set([...text.matchAll(/\b(?:19|20)\d{2}\b/g)].map((match) => Number(match[0])))] .sort((a, b) => a - b);
 
@@ -221,6 +223,7 @@ export function communityGraphRank(
   if (!acceptedEntities.length) return [];
   const entityById = new Map(acceptedEntities.map((entity) => [entity.id, entity]));
   const queryTerms = new Set(tokenizeRetrieval(query));
+  const broadIntent = /\b(?:overall|overview|summari[sz]e|themes?|communities|clusters?|landscape|big picture)\b/i.test(query);
   const communities = graphCommunities(entities, relations);
   const evidence = new Map<string, number>();
   communities.forEach((community, communityIndex) => {
@@ -228,7 +231,8 @@ export function communityGraphRank(
     const labels = acceptedRelations.filter((relation) => community.includes(relation.sourceEntityId) && community.includes(relation.targetEntityId)).flatMap((relation) => tokenizeRetrieval(relation.relation));
     const lexicalMatches = [...new Set([...names, ...labels])].filter((term) => queryTerms.has(term)).length;
     const breadth = Math.min(1, Math.log2(community.length + 1) / 5);
-    const score = lexicalMatches ? Math.min(1, 0.55 + lexicalMatches * 0.12 + breadth * 0.2) : Math.max(0.15, breadth * (1 - communityIndex * 0.08));
+    const score = lexicalMatches ? Math.min(1, 0.55 + lexicalMatches * 0.12 + breadth * 0.2) : broadIntent ? Math.max(0.15, breadth * (1 - communityIndex * 0.08)) : 0;
+    if (!score) return;
     for (const id of community) for (const blockId of entityById.get(id)?.evidenceBlockIds ?? []) evidence.set(blockId, Math.max(evidence.get(blockId) ?? 0, score));
     for (const relation of acceptedRelations.filter((item) => community.includes(item.sourceEntityId) && community.includes(item.targetEntityId))) for (const blockId of relation.evidenceBlockIds) evidence.set(blockId, Math.max(evidence.get(blockId) ?? 0, Math.min(1, score + 0.08)));
   });
@@ -297,13 +301,13 @@ export async function hybridRetrieve(
   return reciprocalRankFusion({ bm25, vector, graph }, limit);
 }
 
-async function createDirectTransformersProvider(modelId: string): Promise<EmbeddingProvider> {
+async function createDirectTransformersProvider(modelId: string, revision: string): Promise<EmbeddingProvider> {
   const { pipeline } = await import("@huggingface/transformers");
   const supportsWebGpu = typeof navigator !== "undefined" && "gpu" in navigator;
-  const extractor = await pipeline("feature-extraction", modelId, { device: supportsWebGpu ? "webgpu" : "wasm", dtype: "q8" });
+  const extractor = await pipeline("feature-extraction", modelId, { device: supportsWebGpu ? "webgpu" : "wasm", dtype: "q8", revision });
   return {
     id: modelId,
-    version: "transformers.js-4.2.0",
+    version: `transformers.js-4.2.0@${revision}`,
     workerBacked: false,
     async embed(texts: string[], options = {}) {
       const vectors: number[][] = [];
@@ -327,7 +331,7 @@ interface EmbeddingWorkerMessage {
   device?: string;
 }
 
-async function createWorkerTransformersProvider(modelId: string): Promise<EmbeddingProvider> {
+async function createWorkerTransformersProvider(modelId: string, revision: string): Promise<EmbeddingProvider> {
   const worker = new Worker(new URL("./embedding.worker.ts", import.meta.url), { type: "module", name: "evidenceweave-embedding-worker" });
   const pending = new Map<string, { resolve: (vectors: number[][]) => void; reject: (error: Error) => void }>();
   let disposed = false;
@@ -346,11 +350,11 @@ async function createWorkerTransformersProvider(modelId: string): Promise<Embedd
       else request.reject(new Error(message.error ?? "Embedding worker failed."));
     };
   });
-  worker.postMessage({ type: "init", modelId });
+  worker.postMessage({ type: "init", modelId, revision });
   await ready;
   return {
     id: modelId,
-    version: "transformers.js-4.2.0-worker-v1",
+    version: `transformers.js-4.2.0-worker-v1@${revision}`,
     workerBacked: true,
     embed(texts: string[], options = {}) {
       if (disposed) return Promise.reject(new Error("Embedding worker has been disposed."));
@@ -379,10 +383,10 @@ async function createWorkerTransformersProvider(modelId: string): Promise<Embedd
   };
 }
 
-export async function createTransformersProvider(modelId = "Xenova/all-MiniLM-L6-v2"): Promise<EmbeddingProvider> {
+export async function createTransformersProvider(modelId = DEFAULT_EMBEDDING_MODEL_ID, revision = DEFAULT_EMBEDDING_MODEL_REVISION): Promise<EmbeddingProvider> {
   if (typeof Worker !== "undefined") {
-    try { return await createWorkerTransformersProvider(modelId); }
+    try { return await createWorkerTransformersProvider(modelId, revision); }
     catch { /* fall through to direct WASM/WebGPU provider */ }
   }
-  return createDirectTransformersProvider(modelId);
+  return createDirectTransformersProvider(modelId, revision);
 }
