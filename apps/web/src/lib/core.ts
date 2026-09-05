@@ -59,8 +59,13 @@ export interface EvidenceHit {
   matchedTerms: string[];
 }
 
+export const MAX_TEXT_IMPORT_BYTES = 2 * 1024 * 1024;
+export const MAX_WORKSPACE_EXPORT_BYTES = 5 * 1024 * 1024;
+export const MAX_NOTES_PER_WORKSPACE = 5000;
+
 const now = () => new Date().toISOString();
 const normalize = (value: string) => value.trim().toLocaleLowerCase();
+const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const STOP_WORDS = new Set(["the", "and", "for", "with", "that", "this", "from", "what", "which", "who", "how", "are", "was", "were", "into", "your", "about", "have", "has"]);
 const tokenize = (value: string) => [...new Set(value.toLocaleLowerCase().match(/[\p{L}\p{N}][\p{L}\p{N}_-]{1,}/gu) ?? [])].filter((token) => !STOP_WORDS.has(token));
 
@@ -88,16 +93,41 @@ export function parseMarkdown(markdown: string): ParsedMarkdown {
   return { body, properties, links, tags };
 }
 
+export function makeUniqueTitle(desired: string, notes: NoteRecord[], currentId?: string): string {
+  const base = desired.trim() || "Untitled";
+  const occupied = new Set(notes.filter((note) => note.id !== currentId).map((note) => normalize(note.title)));
+  if (!occupied.has(normalize(base))) return base;
+  let suffix = 2;
+  while (occupied.has(normalize(`${base} (${suffix})`))) suffix += 1;
+  return `${base} (${suffix})`;
+}
+
+export function rewriteWikiLinkTarget(markdown: string, oldTitle: string, newTitle: string): string {
+  if (!oldTitle.trim() || oldTitle === newTitle) return markdown;
+  const target = escapeRegex(oldTitle.trim());
+  const pattern = new RegExp(`\\[\\[${target}(?=(?:#|\\||\\]\\]))`, "giu");
+  return markdown.replace(pattern, `[[${newTitle}`);
+}
+
 export function buildAuthoredGraph(notes: NoteRecord[]): KnowledgeGraph {
-  const titleIndex = new Map(notes.map((note) => [normalize(note.title), note]));
+  const titleIndex = new Map<string, NoteRecord | null>();
+  for (const note of notes) {
+    const key = normalize(note.title);
+    titleIndex.set(key, titleIndex.has(key) ? null : note);
+  }
+
   const nodes: GraphNode[] = notes.map((note) => ({ id: note.id, title: note.title, kind: "note" }));
   const unresolved = new Map<string, GraphNode>();
   const edges: GraphEdge[] = [];
   for (const note of notes) {
     for (const link of parseMarkdown(note.markdown).links) {
-      const resolved = titleIndex.get(normalize(link.target));
+      const lookup = titleIndex.get(normalize(link.target));
+      const resolved = lookup ?? undefined;
       const targetId = resolved?.id ?? `unresolved:${normalize(link.target)}`;
-      if (!resolved && !unresolved.has(targetId)) unresolved.set(targetId, { id: targetId, title: link.target, kind: "unresolved" });
+      if (!resolved && !unresolved.has(targetId)) {
+        const ambiguous = lookup === null;
+        unresolved.set(targetId, { id: targetId, title: ambiguous ? `${link.target} (ambiguous)` : link.target, kind: "unresolved" });
+      }
       edges.push({ id: `${note.id}->${targetId}:${edges.length}`, source: note.id, target: targetId, label: "links-to", resolved: Boolean(resolved) });
     }
   }
@@ -148,9 +178,12 @@ export function extractiveEvidenceSearch(question: string, notes: NoteRecord[], 
     const titleMatches = terms.filter((term) => note.title.toLocaleLowerCase().includes(term)).length;
     const coverage = matched.length / terms.length;
     const graphBonus = Math.min((linkedDegree.get(note.id) ?? 0) * 0.02, 0.1);
-    const score = coverage + titleMatches * 0.15 + graphBonus;
-    return { noteId: note.id, title: note.title, score, excerpt: excerptAround(note.markdown, matched), matchedTerms: matched };
-  }).filter((hit) => hit.matchedTerms.length > 0).sort((a, b) => b.score - a.score || a.title.localeCompare(b.title)).slice(0, limit);
+    const score = Math.min(1, coverage + titleMatches * 0.15 + graphBonus);
+    return { noteId: note.id, title: note.title, score, excerpt: excerptAround(note.markdown, matched), matchedTerms: matched, coverage, titleMatches };
+  }).filter((hit) => hit.titleMatches > 0 || hit.coverage >= 0.34)
+    .sort((a, b) => b.score - a.score || a.title.localeCompare(b.title))
+    .slice(0, limit)
+    .map(({ coverage: _coverage, titleMatches: _titleMatches, ...hit }) => hit);
 }
 
 class EvidenceWeaveDB extends Dexie {
@@ -165,13 +198,15 @@ export const db = new EvidenceWeaveDB();
 export const DEFAULT_WORKSPACE: WorkspaceMeta = { id: "local-default", title: "My EvidenceWeave", createdAt: now(), updatedAt: now() };
 
 export async function seedIfEmpty(): Promise<void> {
-  if (await db.notes.count()) return;
-  const createdAt = now();
-  await db.notes.bulkAdd([
-    { id: crypto.randomUUID(), path: "Welcome.md", title: "Welcome", createdAt, updatedAt: createdAt, markdown: `---\ntype: guide\nstatus: active\ntags: [evidenceweave, local-first]\n---\n# Welcome to EvidenceWeave\n\nEvidenceWeave is a local-first workspace. Start by creating notes and connecting them with wiki links such as [[Evidence]] and [[GraphRAG]].\n\n#start-here #local-first` },
-    { id: crypto.randomUUID(), path: "Evidence.md", title: "Evidence", createdAt, updatedAt: createdAt, markdown: `# Evidence\n\nA useful knowledge graph should preserve where a statement came from. In EvidenceWeave, authored links are deterministic and future inferred edges must carry source provenance.\n\nRelated: [[GraphRAG]] and [[Welcome]].\n\n#provenance #verification` },
-    { id: crypto.randomUUID(), path: "GraphRAG.md", title: "GraphRAG", createdAt, updatedAt: createdAt, markdown: `# GraphRAG\n\nGraphRAG combines retrieval with explicit relationships. The first release builds the authored graph before adding inferred entities, semantic edges, community retrieval, or local generation.\n\nFoundation: [[Evidence]].\n\n#graphrag #roadmap` }
-  ]);
+  await db.transaction("rw", db.notes, async () => {
+    if (await db.notes.count()) return;
+    const createdAt = now();
+    await db.notes.bulkPut([
+      { id: "sample-welcome", path: "Welcome.md", title: "Welcome", createdAt, updatedAt: createdAt, markdown: `---\ntype: guide\nstatus: active\ntags: [evidenceweave, local-first]\n---\n# Welcome to EvidenceWeave\n\nEvidenceWeave is a local-first workspace. Start by creating notes and connecting them with wiki links such as [[Evidence]] and [[GraphRAG]].\n\n#start-here #local-first` },
+      { id: "sample-evidence", path: "Evidence.md", title: "Evidence", createdAt, updatedAt: createdAt, markdown: `# Evidence\n\nA useful knowledge graph should preserve where a statement came from. In EvidenceWeave, authored links are deterministic and future inferred edges must carry source provenance.\n\nRelated: [[GraphRAG]] and [[Welcome]].\n\n#provenance #verification` },
+      { id: "sample-graphrag", path: "GraphRAG.md", title: "GraphRAG", createdAt, updatedAt: createdAt, markdown: `# GraphRAG\n\nGraphRAG combines retrieval with explicit relationships. The first release builds the authored graph before adding inferred entities, semantic edges, community retrieval, or local generation.\n\nFoundation: [[Evidence]].\n\n#graphrag #roadmap` }
+    ]);
+  });
 }
 
 export async function exportWorkspace(notes: NoteRecord[]): Promise<WorkspaceExportV0> {
@@ -182,7 +217,14 @@ export function validateWorkspaceExport(value: unknown): WorkspaceExportV0 {
   if (!value || typeof value !== "object") throw new Error("Workspace export must be an object.");
   const candidate = value as Partial<WorkspaceExportV0>;
   if (candidate.schemaVersion !== 0 || !Array.isArray(candidate.notes) || !candidate.workspace) throw new Error("Unsupported or malformed EvidenceWeave workspace export.");
-  for (const note of candidate.notes) if (!note || typeof note.id !== "string" || typeof note.title !== "string" || typeof note.markdown !== "string") throw new Error("Workspace contains a malformed note.");
+  if (candidate.notes.length > MAX_NOTES_PER_WORKSPACE) throw new Error(`Workspace exceeds the ${MAX_NOTES_PER_WORKSPACE.toLocaleString()} note safety limit.`);
+  const titles = new Set<string>();
+  for (const note of candidate.notes) {
+    if (!note || typeof note.id !== "string" || typeof note.title !== "string" || typeof note.path !== "string" || typeof note.markdown !== "string" || typeof note.createdAt !== "string" || typeof note.updatedAt !== "string") throw new Error("Workspace contains a malformed note.");
+    const key = normalize(note.title);
+    if (!key || titles.has(key)) throw new Error(`Workspace contains a duplicate or empty note title: ${note.title || "(empty)"}.`);
+    titles.add(key);
+  }
   return candidate as WorkspaceExportV0;
 }
 
