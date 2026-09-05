@@ -128,6 +128,45 @@ export interface SavedViewRecord {
   updatedAt: string;
 }
 
+export interface TemplateRecord {
+  id: string;
+  title: string;
+  body: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkspaceStateRecord {
+  id: "default";
+  activeView: string;
+  activeNoteId?: string;
+  openNoteIds: string[];
+  recentNoteIds: string[];
+  selectedCanvasId?: string;
+  selectedSavedViewId?: string;
+  updatedAt: string;
+}
+
+export interface MigrationRecord {
+  id: string;
+  fromVersion: number;
+  toVersion: number;
+  appliedAt: string;
+  recoverySnapshotId?: string;
+}
+
+export interface SemanticLinkSuggestionRecord {
+  id: string;
+  sourceEntityId: string;
+  targetEntityId: string;
+  score: number;
+  evidenceBlockIds: string[];
+  modelId: string;
+  modelVersion: string;
+  status: ReviewStatus;
+  updatedAt: string;
+}
+
 export interface TrashRecord {
   id: string;
   kind: "note" | "document" | "canvas";
@@ -146,7 +185,7 @@ export interface ReviewAuditRecord {
   id: string;
   targetKind: "entity" | "relation";
   targetId: string;
-  action: "accept" | "reject" | "reopen" | "rename" | "merge" | "split" | "pin" | "unpin" | "edit-validity";
+  action: "accept" | "reject" | "reopen" | "rename" | "merge" | "split" | "pin" | "unpin" | "edit-validity" | "undo";
   previousStatus?: ReviewStatus;
   nextStatus?: ReviewStatus;
   extractorVersion: string;
@@ -173,6 +212,10 @@ class EvidenceWeaveKnowledgeDB extends Dexie {
   embeddings!: Table<EmbeddingRecord, string>;
   canvases!: Table<CanvasRecord, string>;
   views!: Table<SavedViewRecord, string>;
+  templates!: Table<TemplateRecord, string>;
+  workspaceState!: Table<WorkspaceStateRecord, string>;
+  migrations!: Table<MigrationRecord, string>;
+  semanticSuggestions!: Table<SemanticLinkSuggestionRecord, string>;
   trash!: Table<TrashRecord, string>;
   snapshots!: Table<SnapshotRecord, string>;
   reviewAudit!: Table<ReviewAuditRecord, string>;
@@ -199,6 +242,23 @@ class EvidenceWeaveKnowledgeDB extends Dexie {
       embeddings: "id, blockId, modelId, modelVersion, contentHash, createdAt",
       canvases: "id, title, updatedAt",
       views: "id, title, mode, updatedAt",
+      trash: "id, kind, deletedAt",
+      snapshots: "id, createdAt",
+      reviewAudit: "id, targetKind, targetId, action, createdAt",
+      queryTraces: "id, mode, createdAt"
+    });
+    this.version(3).stores({
+      documents: "id, name, format, sha256, importedAt, status",
+      blocks: "id, documentId, format, contentHash",
+      entities: "id, normalizedName, entityType, status, updatedAt",
+      relations: "id, sourceEntityId, targetEntityId, relation, status, updatedAt",
+      embeddings: "id, blockId, modelId, modelVersion, contentHash, createdAt",
+      canvases: "id, title, updatedAt",
+      views: "id, title, mode, updatedAt",
+      templates: "id, title, updatedAt",
+      workspaceState: "id, updatedAt",
+      migrations: "id, toVersion, appliedAt",
+      semanticSuggestions: "id, sourceEntityId, targetEntityId, status, modelId, updatedAt",
       trash: "id, kind, deletedAt",
       snapshots: "id, createdAt",
       reviewAudit: "id, targetKind, targetId, action, createdAt",
