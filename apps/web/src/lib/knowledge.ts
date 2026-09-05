@@ -1,10 +1,9 @@
+import { parseMarkdown, type KnowledgeGraph, type NoteRecord } from "./core";
 import {
-  extractiveEvidenceSearch,
-  parseMarkdown,
-  type EvidenceHit,
-  type KnowledgeGraph,
-  type NoteRecord
-} from "./core";
+  RETRIEVAL_VERSION,
+  searchEvidenceBlocks,
+  type BlockEvidenceHit
+} from "./retrieval";
 
 export interface MentionHit {
   sourceNoteId: string;
@@ -18,12 +17,17 @@ export interface GraphPath {
   hops: number;
 }
 
-export interface GraphEvidenceHit extends EvidenceHit {
+export interface GraphEvidenceHit extends BlockEvidenceHit {
+  title: string;
+  excerpt: string;
   graphPath?: GraphPath;
   retrievalScore: number;
 }
 
 export interface GraphQueryTrace {
+  question: string;
+  createdAt: string;
+  retrievalVersion: string;
   mode: "lexical" | "local-graph" | "multi-hop";
   reason: string;
   anchors: { id: string; title: string }[];
@@ -33,14 +37,6 @@ export interface GraphQueryTrace {
 
 const normalize = (value: string) => value.trim().toLocaleLowerCase();
 const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-function plainText(markdown: string): string {
-  return parseMarkdown(markdown).body
-    .replace(/\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|([^\]]+))?\]\]/g, "$2$1")
-    .replace(/[#*_`>~-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
 
 function excerptAt(text: string, start: number, max = 220): string {
   const from = Math.max(0, start - Math.floor(max / 3));
@@ -167,7 +163,7 @@ export function planGraphEvidence(
     }
   }
 
-  const base = extractiveEvidenceSearch(question, notes, graph, Math.max(limit * 3, limit));
+  const base = searchEvidenceBlocks(question, notes, Math.max(limit * 4, limit));
   const primaryAnchor = anchors[0];
   const evidence = base.map((hit): GraphEvidenceHit => {
     const graphPath = primaryAnchor
@@ -176,12 +172,17 @@ export function planGraphEvidence(
     const pathBoost = graphPath && graphPath.hops > 0 ? Math.max(0.03, 0.12 - graphPath.hops * 0.025) : 0;
     return {
       ...hit,
+      title: hit.noteTitle,
+      excerpt: hit.text,
       graphPath,
       retrievalScore: Math.min(1, hit.score + pathBoost)
     };
-  }).sort((left, right) => right.retrievalScore - left.retrievalScore || left.title.localeCompare(right.title)).slice(0, limit);
+  }).sort((left, right) => right.retrievalScore - left.retrievalScore || left.title.localeCompare(right.title) || left.startOffset - right.startOffset).slice(0, limit);
 
   return {
+    question,
+    createdAt: new Date().toISOString(),
+    retrievalVersion: `${RETRIEVAL_VERSION}+authored-path-v1`,
     mode,
     reason,
     anchors: anchors.map((note) => ({ id: note.id, title: note.title })),
