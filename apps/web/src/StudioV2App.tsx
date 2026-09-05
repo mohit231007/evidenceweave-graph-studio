@@ -36,6 +36,8 @@ import {
   splitEntity
 } from "./lib/review";
 import { undoReviewAudit } from "./lib/review-undo";
+import { createLocalNerProvider, extractLocalModelEntityCandidates, type LocalNerProvider } from "./lib/local-ner";
+import { buildSemanticLinkSuggestions, reviewSemanticLink } from "./lib/semantic-links";
 import { loadWorkspaceState, saveWorkspaceState, touchRecentNote } from "./lib/workspace-state";
 import {
   knowledgeDb,
@@ -46,6 +48,7 @@ import {
   type RelationCandidateRecord,
   type ReviewAuditRecord,
   type SavedViewRecord,
+  type SemanticLinkSuggestionRecord,
   type SnapshotRecord,
   type SourceDocumentRecord,
   type TrashRecord
@@ -102,6 +105,7 @@ export default function StudioV2App() {
   const [snapshots, setSnapshots] = useState<SnapshotRecord[]>([]);
   const [reviewAudit, setReviewAudit] = useState<ReviewAuditRecord[]>([]);
   const [queryTraces, setQueryTraces] = useState<QueryTraceRecord[]>([]);
+  const [semanticSuggestions, setSemanticSuggestions] = useState<SemanticLinkSuggestionRecord[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [view, setView] = useState<MainView>("workspace");
   const [mode, setMode] = useState<NoteMode>("edit");
@@ -115,6 +119,7 @@ export default function StudioV2App() {
   const [semanticProgress, setSemanticProgress] = useState("");
   const [llmProgress, setLlmProgress] = useState("");
   const semanticProvider = useRef<EmbeddingProvider | undefined>(undefined);
+  const localNerProvider = useRef<LocalNerProvider | undefined>(undefined);
 
   const refresh = async (preferId?: string) => {
     const [
@@ -128,7 +133,8 @@ export default function StudioV2App() {
       nextTrash,
       nextSnapshots,
       nextAudit,
-      nextTraces
+      nextTraces,
+      nextSemanticSuggestions
     ] = await Promise.all([
       db.notes.orderBy("updatedAt").reverse().toArray(),
       knowledgeDb.documents.orderBy("importedAt").reverse().toArray(),
@@ -140,7 +146,8 @@ export default function StudioV2App() {
       knowledgeDb.trash.orderBy("deletedAt").reverse().toArray(),
       knowledgeDb.snapshots.orderBy("createdAt").reverse().toArray(),
       knowledgeDb.reviewAudit.orderBy("createdAt").reverse().toArray(),
-      knowledgeDb.queryTraces.orderBy("createdAt").reverse().toArray()
+      knowledgeDb.queryTraces.orderBy("createdAt").reverse().toArray(),
+      knowledgeDb.semanticSuggestions.orderBy("updatedAt").reverse().toArray()
     ]);
     setNotes(nextNotes);
     setDocuments(nextDocuments);
@@ -153,6 +160,7 @@ export default function StudioV2App() {
     setSnapshots(nextSnapshots);
     setReviewAudit(nextAudit);
     setQueryTraces(nextTraces);
+    setSemanticSuggestions(nextSemanticSuggestions);
     setSelectedId((current) => {
       if (preferId && nextNotes.some((note) => note.id === preferId)) return preferId;
       if (current && nextNotes.some((note) => note.id === current)) return current;
@@ -172,6 +180,11 @@ export default function StudioV2App() {
   useEffect(() => {
     void saveWorkspaceState({ activeView: view, activeNoteId: selectedId || undefined });
   }, [view, selectedId]);
+
+  useEffect(() => () => {
+    semanticProvider.current?.dispose?.();
+    localNerProvider.current?.dispose?.();
+  }, []);
 
   const selected = notes.find((note) => note.id === selectedId);
   const authoredGraph = useMemo(() => buildAuthoredGraph(notes), [notes]);
@@ -315,6 +328,53 @@ export default function StudioV2App() {
     await refresh();
     setView("review");
     setStatus(`Generated ${freshEntities.length} entity and ${freshRelations.length} relationship candidates. Previous decisions are kept only when extractor versions still match.`);
+  };
+
+  const runLocalNer = async () => {
+    try {
+      setStatus("Loading optional local NER model. First use downloads model files; all inference stays in this browser.");
+      localNerProvider.current ??= await createLocalNerProvider();
+      const provider = localNerProvider.current;
+      const previousByKey = new Map(entities.map((entity) => [`${entity.entityType}:${entity.normalizedName}`, entity]));
+      const modelCandidates = await extractLocalModelEntityCandidates(sources, provider, {
+        onProgress: (completed, total) => setStatus(`Local NER ${completed}/${total} source blocks…`)
+      });
+      const candidates = modelCandidates.flatMap((candidate) => {
+        const key = `${candidate.entityType}:${candidate.normalizedName}`;
+        const previous = previousByKey.get(key);
+        if (previous && !previous.extractorVersion.startsWith("local-ner:")) return [];
+        return [reconcileEntityReview(previous, candidate)];
+      });
+      if (candidates.length) await knowledgeDb.entities.bulkPut(candidates);
+      await refresh();
+      setView("review");
+      setStatus(`Optional local NER proposed ${candidates.length} additional pending candidate${candidates.length === 1 ? "" : "s"}; deterministic candidates remain authoritative until review.`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Local NER failed.");
+    }
+  };
+
+  const buildSemanticSuggestions = async () => {
+    try {
+      if (!semanticProvider.current) {
+        setSemanticState("loading");
+        setStatus("Loading the pinned local embedding model before semantic-link analysis…");
+        semanticProvider.current = await createTransformersProvider();
+        setSemanticState("ready");
+      }
+      const suggestions = await buildSemanticLinkSuggestions(entities, semanticProvider.current);
+      await refresh();
+      setView("review");
+      setStatus(`Generated ${suggestions.length} separate semantic-link suggestion${suggestions.length === 1 ? "" : "s"}. No authored or inferred graph edge was mutated.`);
+    } catch (error) {
+      setSemanticState("failed");
+      setStatus(error instanceof Error ? error.message : "Semantic-link analysis failed.");
+    }
+  };
+
+  const reviewSemanticSuggestion = async (id: string, accepted: boolean) => {
+    await reviewSemanticLink(id, accepted ? "accepted" : "rejected");
+    await refresh();
   };
 
   const reviewEntity = async (entity: EntityCandidateRecord, accepted: boolean) => {
@@ -505,7 +565,7 @@ export default function StudioV2App() {
         {view === "workspace" && <WorkspaceView note={selected} notes={notes} graph={authoredGraph} mode={mode} setMode={setMode} save={saveSelected} rename={renameSelected} remove={trashSelected} openNote={openNote} />}
         {view === "documents" && <DocumentsView documents={documents} blocks={blocks} importKnowledge={importKnowledge} />}
         {view === "graph" && <GraphStudio graph={authoredGraph} entities={entities} relations={relations} onOpen={openNote} />}
-        {view === "review" && <ReviewView entities={entities} relations={relations} blocks={sources} audit={reviewAudit} rebuild={rebuildCandidates} reviewEntity={reviewEntity} reviewRelation={reviewRelation} renameEntity={renameReviewedEntity} togglePin={togglePin} mergeEntity={mergeReviewedEntity} splitEntity={splitReviewedEntity} undoAudit={undoAuditAction} />}
+        {view === "review" && <ReviewView entities={entities} relations={relations} blocks={sources} audit={reviewAudit} rebuild={rebuildCandidates} reviewEntity={reviewEntity} reviewRelation={reviewRelation} renameEntity={renameReviewedEntity} togglePin={togglePin} mergeEntity={mergeReviewedEntity} splitEntity={splitReviewedEntity} undoAudit={undoAuditAction} runLocalNer={runLocalNer} buildSemanticSuggestions={buildSemanticSuggestions} semanticSuggestions={semanticSuggestions} reviewSemanticSuggestion={reviewSemanticSuggestion} />}
         {view === "evidence" && <EvidenceStudio question={question} setQuestion={setQuestion} evidence={evidence} trace={trace} verified={verified} entities={entities} sources={sources} semanticState={semanticState} semanticProgress={semanticProgress} enableSemantic={enableSemantic} runEvidence={runEvidence} runLocalLlm={runLocalLlm} llmProgress={llmProgress} />}
         {view === "canvas" && <CanvasStudio canvases={canvases} notes={notes} selected={selected} refresh={refresh} />}
         {view === "library" && <LibraryStudio notes={notes} graph={authoredGraph} documents={documents} entities={entities} relations={relations} views={views} trash={trash} snapshots={snapshots} queryTraces={queryTraces} reviewAudit={reviewAudit} restoreTrash={restoreTrash} restoreSnapshot={restoreSnapshot} openNote={openNote} refresh={refresh} />}
@@ -646,7 +706,7 @@ function GraphStudio({ graph, entities, relations, onOpen }: {
   );
 }
 
-function ReviewView({ entities, relations, blocks, audit, rebuild, reviewEntity, reviewRelation, renameEntity: renameEntityAction, togglePin, mergeEntity, splitEntity: splitEntityAction, undoAudit }: {
+function ReviewView({ entities, relations, blocks, audit, rebuild, reviewEntity, reviewRelation, renameEntity: renameEntityAction, togglePin, mergeEntity, splitEntity: splitEntityAction, undoAudit, runLocalNer, buildSemanticSuggestions, semanticSuggestions, reviewSemanticSuggestion }: {
   entities: EntityCandidateRecord[];
   relations: RelationCandidateRecord[];
   blocks: UnifiedSourceBlock[];
@@ -659,6 +719,10 @@ function ReviewView({ entities, relations, blocks, audit, rebuild, reviewEntity,
   mergeEntity: (entity: EntityCandidateRecord) => Promise<void>;
   splitEntity: (entity: EntityCandidateRecord) => Promise<void>;
   undoAudit: (id: string) => Promise<void>;
+  runLocalNer: () => Promise<void>;
+  buildSemanticSuggestions: () => Promise<void>;
+  semanticSuggestions: SemanticLinkSuggestionRecord[];
+  reviewSemanticSuggestion: (id: string, accepted: boolean) => Promise<void>;
 }) {
   const [scope, setScope] = useState<"pending" | "reviewed">("pending");
   const visibleEntities = entities.filter((item) => !item.mergedIntoId && (scope === "pending" ? item.status === "pending" : item.status !== "pending"));
@@ -669,7 +733,7 @@ function ReviewView({ entities, relations, blocks, audit, rebuild, reviewEntity,
     <div className="single-view">
       <div className="hero-row">
         <div><span className="eyebrow">Human review queue</span><h1>Inference proposes. You decide.</h1><p>Every decision is auditable. Extractor-version changes reopen stale decisions rather than silently inheriting trust.</p></div>
-        <button className="primary" onClick={() => void rebuild()}>Rebuild candidates</button>
+        <div className="review-actions wrap-actions"><button className="primary" onClick={() => void rebuild()}>Rebuild deterministic</button><button onClick={() => void runLocalNer()}>Optional local NER</button><button onClick={() => void buildSemanticSuggestions()}>Suggest semantic links</button></div>
       </div>
       <div className="segmented compact-segmented"><button className={scope === "pending" ? "active" : ""} onClick={() => setScope("pending")}>Pending</button><button className={scope === "reviewed" ? "active" : ""} onClick={() => setScope("reviewed")}>Reviewed</button></div>
       <div className="review-columns">
@@ -698,6 +762,8 @@ function ReviewView({ entities, relations, blocks, audit, rebuild, reviewEntity,
               {relation.status === "pending" && <div className="review-actions"><button onClick={() => void reviewRelation(relation, true)}>Accept</button><button onClick={() => void reviewRelation(relation, false)}>Reject</button></div>}
             </article>
           ))}
+          <h2>Semantic suggestions <span>{semanticSuggestions.length}</span></h2>
+          {semanticSuggestions.slice(0, 30).map((suggestion) => <article className="review-card" key={suggestion.id}><div><strong>{entityMap.get(suggestion.sourceEntityId)?.canonicalName ?? suggestion.sourceEntityId}</strong><small> ⇄ semantic · {Math.round(suggestion.score * 100)}% ⇄ </small><strong>{entityMap.get(suggestion.targetEntityId)?.canonicalName ?? suggestion.targetEntityId}</strong></div><p>{suggestion.status} · {suggestion.modelId}</p>{suggestion.status === "pending" && <div className="review-actions"><button onClick={() => void reviewSemanticSuggestion(suggestion.id, true)}>Accept suggestion</button><button onClick={() => void reviewSemanticSuggestion(suggestion.id, false)}>Reject suggestion</button></div>}</article>)}
           <h2>Recent audit <span>{audit.length}</span></h2>
           <div className="audit-list">{audit.slice(0, 20).map((item) => <div className="audit-row" key={item.id}><strong>{item.action}</strong><span>{item.targetKind} · {item.targetId.slice(0, 28)}</span><time>{new Date(item.createdAt).toLocaleString()}</time>{item.action !== "undo" && item.beforeJson && <button onClick={() => void undoAudit(item.id)}>Undo</button>}</div>)}</div>
         </section>
