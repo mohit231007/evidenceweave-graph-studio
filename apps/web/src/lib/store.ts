@@ -17,6 +17,16 @@ export interface SourceDocumentRecord {
   error?: string;
 }
 
+export interface SourceBounds {
+  page?: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  unit: "pdf-point" | "css-px";
+  origin?: "bottom-left" | "top-left";
+}
+
 export interface SourceLocation {
   page?: number;
   row?: number;
@@ -24,6 +34,7 @@ export interface SourceLocation {
   section?: string;
   startOffset?: number;
   endOffset?: number;
+  bounds?: SourceBounds[];
 }
 
 export interface DocumentBlockRecord {
