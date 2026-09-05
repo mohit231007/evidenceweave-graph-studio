@@ -135,7 +135,7 @@ export interface ReviewAuditRecord {
   id: string;
   targetKind: "entity" | "relation";
   targetId: string;
-  action: "accept" | "reject" | "reopen" | "rename" | "merge" | "split" | "pin" | "unpin";
+  action: "accept" | "reject" | "reopen" | "rename" | "merge" | "split" | "pin" | "unpin" | "edit-validity";
   previousStatus?: ReviewStatus;
   nextStatus?: ReviewStatus;
   extractorVersion: string;
