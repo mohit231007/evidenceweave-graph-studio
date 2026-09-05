@@ -4,7 +4,7 @@
 
 EvidenceWeave is a local-first knowledge graph and GraphRAG workspace that runs in your browser. The product is being built from the non-AI core outward: user-owned Markdown, deterministic links/backlinks, an inspectable authored graph, portable exports, and a universal extractive evidence path before optional local generation is added.
 
-> **Current status — Knowledge Foundation v0.2:** real browser workspace, local persistence, Markdown/TXT import, portable JSON export/restore, typed frontmatter inspection, wiki links, backlinks, unlinked mentions, global/local authored graph exploration, property-library view, deterministic lexical/local/multi-hop query planning, graph-path proof, and offline-PWA scaffolding. Full document ingestion, inferred entity review, vector embeddings, Canvas, local WebLLM generation, and claim-level generated-answer validation are still roadmap items—not shipped claims.
+> **Current status — Provenance Foundation v0.3:** real browser workspace, local persistence, Markdown/TXT import, portable JSON export/restore, typed frontmatter inspection, wiki links, backlinks, unlinked mentions, global/local authored graph exploration, property-library view, deterministic lexical/local/multi-hop query planning, block-level evidence provenance, graph-path proof, downloadable query traces, and offline-PWA scaffolding. Full document ingestion, inferred entity review, vector embeddings, Canvas, local WebLLM generation, and claim-level generated-answer validation are still roadmap items—not shipped claims.
 
 ## Product principles
 
@@ -13,6 +13,7 @@ EvidenceWeave is a local-first knowledge graph and GraphRAG workspace that runs 
 - **Open knowledge:** Markdown remains the source format and the workspace can be exported.
 - **Graph before GraphRAG:** authored relationships and graph invariants are established before inferred knowledge is trusted.
 - **Evidence before generation:** deterministic evidence search remains the compatibility fallback even after local generation arrives.
+- **Block-level provenance:** every retrieved source block has a deterministic ID, heading path, and exact character offsets back into the Markdown source.
 - **Visible gaps:** unresolved links, ambiguous titles, weak retrieval, and missing paths are shown rather than silently invented.
 - **Explain graph contribution:** graph boosts are accompanied by the exact authored path that produced them.
 - **Clean-room implementation:** inspired by general knowledge-work patterns, not copied from Obsidian or any other proprietary product.
@@ -32,9 +33,11 @@ EvidenceWeave is a local-first knowledge graph and GraphRAG workspace that runs 
 | Global graph | ✅ Cytoscape.js, unresolved targets included |
 | Local graph | ✅ Selected-note neighborhood with depth 1–3 |
 | Full-text note filter | ✅ Local substring search |
-| Evidence mode | ✅ Deterministic source excerpts with support threshold |
+| Source blocks | ✅ Deterministic IDs, headings, exact source offsets |
+| Evidence mode | ✅ Weighted block retrieval with fail-closed support threshold |
 | Query routing | ✅ Lexical / local-graph / multi-hop authored-path modes |
 | Graph proof | ✅ Bounded shortest paths over resolved authored edges |
+| Query trace | ✅ JSON export with question, route, retriever version, sources, paths and scores |
 | Import | ✅ Markdown and TXT with size bounds |
 | Export/restore | ✅ Versioned validated JSON workspace |
 | PWA shell | ✅ Static/offline scaffolding |
@@ -45,7 +48,7 @@ EvidenceWeave is a local-first knowledge graph and GraphRAG workspace that runs 
 | Canvas | ⏳ Planned |
 | Local WebLLM | ⏳ Optional later layer |
 
-## How graph proof works today
+## How evidence and graph proof work today
 
 EvidenceWeave does **not** label deterministic retrieval as generated GraphRAG. The current query planner:
 
@@ -53,12 +56,30 @@ EvidenceWeave does **not** label deterministic retrieval as generated GraphRAG. 
 2. Routes two-or-more named notes to **multi-hop** mode.
 3. Otherwise uses the current note as a **local-graph** anchor when available.
 4. Falls back to **lexical** evidence retrieval when no graph anchor exists.
-5. Searches source notes with a fail-closed lexical support threshold.
-6. Computes bounded shortest paths only over resolved, authored edges.
-7. Applies a small graph-path ranking contribution and displays the exact path beside the evidence.
-8. Refuses to treat a graph path by itself as proof of a factual claim when no source note crosses the evidence threshold.
+5. Splits Markdown into deterministic source blocks while preserving heading context and exact source offsets.
+6. Scores query terms with workspace-level rarity weighting and a fail-closed support threshold.
+7. Computes bounded shortest paths only over resolved, authored edges.
+8. Applies a small graph-path ranking contribution and displays the exact path beside the source block.
+9. Refuses to treat a graph path by itself as proof of a factual claim when no source block crosses the evidence threshold.
+10. Exports the complete deterministic query trace as JSON for inspection or later evaluation.
 
 This creates the proof layer that later BM25/vector/community retrieval and optional local generation must obey rather than bypass.
+
+## Source-block contract
+
+A retrieved block carries:
+
+```text
+block id        <note-id>::<start-offset>-<end-offset>
+note id/title   stable workspace identity
+heading path    Markdown heading hierarchy at the block
+start/end       exact character offsets into the Markdown source
+matched terms   query terms contributing lexical support
+weighted score  bounded deterministic retrieval signal
+graph path      optional authored path used as a ranking contribution
+```
+
+Future PDF/DOCX/CSV importers should map their own page/row/source coordinates into the same proof-oriented model instead of discarding provenance during ingestion.
 
 ## Run locally
 
