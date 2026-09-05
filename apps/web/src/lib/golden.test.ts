@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bm25Rank } from "./hybrid";
+import { bm25Rank, graphRank, reciprocalRankFusion } from "./hybrid";
 import { runEvidenceQuery } from "./engine";
 import { evaluateRetrieval } from "./eval";
 import { goldenBlocks, goldenEntities, goldenQuestions, goldenRelations } from "./golden";
@@ -16,6 +16,27 @@ describe("golden retrieval corpus", () => {
     expect(metrics.mrr).toBeGreaterThanOrEqual(.7);
   });
 
+  it("keeps deterministic BM25+graph RRF at least as strong as the best enabled single channel on the golden corpus", () => {
+    const questions = goldenQuestions.filter((question) => question.relevantBlockIds.length);
+    const lexicalCases = questions.map((question) => ({ id: question.id, relevantIds: question.relevantBlockIds, rankedIds: bm25Rank(question.question, goldenBlocks, 5).map((hit) => hit.block.id) }));
+    const graphCases = questions.map((question) => ({ id: question.id, relevantIds: question.relevantBlockIds, rankedIds: graphRank(question.question, goldenBlocks, goldenEntities, goldenRelations, 5).map((hit) => hit.block.id) }));
+    const fusedCases = questions.map((question) => ({
+      id: question.id,
+      relevantIds: question.relevantBlockIds,
+      rankedIds: reciprocalRankFusion({
+        bm25: bm25Rank(question.question, goldenBlocks, 10),
+        graph: graphRank(question.question, goldenBlocks, goldenEntities, goldenRelations, 10)
+      }, 5).map((hit) => hit.block.id)
+    }));
+    const lexical = evaluateRetrieval(lexicalCases, 5);
+    const graph = evaluateRetrieval(graphCases, 5);
+    const fused = evaluateRetrieval(fusedCases, 5);
+    const bestRecall = Math.max(lexical.recallAtK, graph.recallAtK);
+    const bestMrr = Math.max(lexical.mrr, graph.mrr);
+    expect(fused.recallAtK).toBeGreaterThanOrEqual(bestRecall);
+    expect(fused.mrr).toBeGreaterThanOrEqual(bestMrr);
+  });
+
   it("retrieves every sourced hop for the multi-hop golden question", async () => {
     const result = await runEvidenceQuery({ question: "How does Project Atlas relate to Microsoft?", blocks: goldenBlocks, entities: goldenEntities, relations: goldenRelations, limit: 5, persistTrace: false });
     const ids = new Set(result.evidence.map((hit) => hit.block.id));
@@ -23,6 +44,10 @@ describe("golden retrieval corpus", () => {
     expect(ids.has("g-openai-microsoft")).toBe(true);
     expect(result.trace.route.mode).toBe("multi-hop");
     expect(result.trace.paths[0]?.hops).toHaveLength(2);
+  });
+
+  it("does not inject community evidence into unrelated non-broad questions", () => {
+    expect(graphRank("Where does EvidenceWeave store authored notes?", goldenBlocks, goldenEntities, goldenRelations, 5)).toEqual([]);
   });
 
   it("does not invent a graph path for a disconnected question", async () => {
