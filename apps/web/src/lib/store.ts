@@ -48,6 +48,8 @@ export interface EntityCandidateRecord {
   extractorVersion: string;
   status: ReviewStatus;
   aliases: string[];
+  pinned?: boolean;
+  mergedIntoId?: string;
   updatedAt: string;
 }
 
@@ -71,6 +73,7 @@ export interface EmbeddingRecord {
   blockId: string;
   modelId: string;
   modelVersion: string;
+  contentHash: string;
   dimensions: number;
   vector: number[];
   createdAt: string;
@@ -78,13 +81,14 @@ export interface EmbeddingRecord {
 
 export interface CanvasNodeRecord {
   id: string;
-  kind: "note" | "document" | "label";
+  kind: "note" | "document" | "label" | "group";
   refId?: string;
   label: string;
   x: number;
   y: number;
   width: number;
   height: number;
+  groupId?: string;
 }
 
 export interface CanvasEdgeRecord {
@@ -127,6 +131,29 @@ export interface SnapshotRecord {
   createdAt: string;
 }
 
+export interface ReviewAuditRecord {
+  id: string;
+  targetKind: "entity" | "relation";
+  targetId: string;
+  action: "accept" | "reject" | "reopen" | "rename" | "merge" | "split" | "pin" | "unpin";
+  previousStatus?: ReviewStatus;
+  nextStatus?: ReviewStatus;
+  extractorVersion: string;
+  evidenceBlockIds: string[];
+  beforeJson?: string;
+  afterJson?: string;
+  createdAt: string;
+}
+
+export interface QueryTraceRecord {
+  id: string;
+  question: string;
+  mode: string;
+  retrievalVersion: string;
+  payload: string;
+  createdAt: string;
+}
+
 class EvidenceWeaveKnowledgeDB extends Dexie {
   documents!: Table<SourceDocumentRecord, string>;
   blocks!: Table<DocumentBlockRecord, string>;
@@ -137,6 +164,8 @@ class EvidenceWeaveKnowledgeDB extends Dexie {
   views!: Table<SavedViewRecord, string>;
   trash!: Table<TrashRecord, string>;
   snapshots!: Table<SnapshotRecord, string>;
+  reviewAudit!: Table<ReviewAuditRecord, string>;
+  queryTraces!: Table<QueryTraceRecord, string>;
 
   constructor() {
     super("evidenceweave-knowledge");
@@ -150,6 +179,19 @@ class EvidenceWeaveKnowledgeDB extends Dexie {
       views: "id, title, mode, updatedAt",
       trash: "id, kind, deletedAt",
       snapshots: "id, createdAt"
+    });
+    this.version(2).stores({
+      documents: "id, name, format, sha256, importedAt, status",
+      blocks: "id, documentId, format, contentHash",
+      entities: "id, normalizedName, entityType, status, updatedAt",
+      relations: "id, sourceEntityId, targetEntityId, relation, status, updatedAt",
+      embeddings: "id, blockId, modelId, modelVersion, contentHash, createdAt",
+      canvases: "id, title, updatedAt",
+      views: "id, title, mode, updatedAt",
+      trash: "id, kind, deletedAt",
+      snapshots: "id, createdAt",
+      reviewAudit: "id, targetKind, targetId, action, createdAt",
+      queryTraces: "id, mode, createdAt"
     });
   }
 }
