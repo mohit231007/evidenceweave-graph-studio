@@ -1,6 +1,6 @@
 import { bm25Rank, graphRank, reciprocalRankFusion, type EmbeddingProvider, type RankedEvidence, type UnifiedSourceBlock } from "./hybrid";
 import { buildRelationProofs, connectedComponents, relationMatchesTemporal, type QueryRoute, type RelationPathProof } from "./reasoning";
-import { cachedVectorRank, ensureSemanticIndex } from "./semantic";
+import { cachedVectorRank, ensureSemanticIndex, type SemanticIndexOptions } from "./semantic";
 import { knowledgeDb, type EntityCandidateRecord, type QueryTraceRecord, type RelationCandidateRecord } from "./store";
 
 export const EVIDENCE_ENGINE_VERSION = "evidence-engine-v2";
@@ -73,7 +73,7 @@ export async function runEvidenceQuery(args: {
   provider?: EmbeddingProvider;
   limit?: number;
   persistTrace?: boolean;
-  semanticProgress?: Parameters<typeof ensureSemanticIndex>[2]["onProgress"];
+  semanticProgress?: SemanticIndexOptions["onProgress"];
 }): Promise<EvidenceQueryResult> {
   const question = args.question.trim();
   if (!question) throw new Error("Question cannot be empty.");
