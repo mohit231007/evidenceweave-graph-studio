@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { buildBm25IndexCancellable, BM25_INDEX_VERSION } from "./bm25-indexing";
 import { buildDocumentContainment, ingestBytes, MAX_CSV_CELL_CHARS } from "./documents";
 import { blockMatchesTemporal } from "./engine";
 import { bm25IndexFor, bm25RankFromIndex, communityGraphRank, graphCommunities, type UnifiedSourceBlock } from "./hybrid";
-import type { EntityCandidateRecord, RelationCandidateRecord } from "./store";
+import { dailyCalendar, dailyTemplateBody, parseDailyTitle, shiftCalendarDate, touchRecentNote } from "./workspace-state";
+import type { NoteRecord } from "./core";
+import type { EntityCandidateRecord, RelationCandidateRecord, WorkspaceStateRecord } from "./store";
 
 const blocks: UnifiedSourceBlock[] = [
   { id: "b-2018", sourceType: "document", sourceId: "d", title: "Acquisition", headingPath: [], text: "Microsoft acquired GitHub in 2018.", mentionedYears: [2018] },
@@ -28,10 +31,25 @@ describe("completion hardening", () => {
     expect(bm25RankFromIndex("microsoft github", first)[0].block.id).toBe("b-2018");
   });
 
+  it("builds a versioned cancellable BM25 index with progress", async () => {
+    const progress: number[] = [];
+    const index = await buildBm25IndexCancellable(blocks, { yieldEvery: 1, onProgress: (item) => {
+      expect(item.version).toBe(BM25_INDEX_VERSION);
+      progress.push(item.completed);
+    } });
+    expect(bm25RankFromIndex("microsoft github", index)[0].block.id).toBe("b-2018");
+    expect(progress.at(-1)).toBe(blocks.length);
+
+    const controller = new AbortController();
+    controller.abort();
+    await expect(buildBm25IndexCancellable(blocks, { signal: controller.signal })).rejects.toMatchObject({ name: "AbortError" });
+  });
+
   it("filters source blocks by mentioned and metadata time", () => {
     expect(blockMatchesTemporal(blocks[0], { toYear: 2020 })).toBe(true);
     expect(blockMatchesTemporal(blocks[1], { toYear: 2020 })).toBe(false);
     expect(blockMatchesTemporal(blocks[1], { fromYear: 2024, toYear: 2024 })).toBe(true);
+    expect(blockMatchesTemporal({ ...blocks[2], mentionedYears: undefined }, { fromYear: 2024, toYear: 2024 })).toBe(false);
   });
 
   it("retrieves source-bearing reviewed graph communities without a named anchor", () => {
@@ -65,5 +83,15 @@ describe("completion hardening", () => {
     const controller = new AbortController();
     controller.abort();
     await expect(ingestBytes("a.txt", "text/plain", new TextEncoder().encode("hello").buffer, { signal: controller.signal })).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("keeps daily calendar/template and recent-note state deterministic", () => {
+    expect(parseDailyTitle("Daily 2026-09-06")?.getDate()).toBe(6);
+    expect(shiftCalendarDate(new Date(2026, 8, 6, 12), 1).getDate()).toBe(7);
+    expect(dailyTemplateBody(undefined, new Date(2026, 8, 6, 9, 5), "Daily 2026-09-06")).toContain("# Daily 2026-09-06");
+    const notes: NoteRecord[] = [{ id: "n", title: "Daily 2026-09-06", path: "n.md", markdown: "# x", createdAt: "x", updatedAt: "x" }];
+    expect(dailyCalendar(notes)[0].note.id).toBe("n");
+    const state: WorkspaceStateRecord = { id: "default", activeView: "workspace", openNoteIds: [], recentNoteIds: ["old"], updatedAt: "x" };
+    expect(touchRecentNote(state, "n")).toMatchObject({ activeNoteId: "n", openNoteIds: ["n"], recentNoteIds: ["n", "old"] });
   });
 });
