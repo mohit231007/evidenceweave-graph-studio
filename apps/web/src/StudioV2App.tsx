@@ -13,7 +13,8 @@ import {
   type KnowledgeGraph,
   type NoteRecord
 } from "./lib/core";
-import { formatLocation, ingestFile } from "./lib/documents";
+import { formatLocation, type DocumentImportBundle } from "./lib/documents";
+import { createDocumentImportJob, type DocumentImportJob, type DocumentImportJobSnapshot } from "./lib/document-jobs";
 import { extractEntityCandidates, extractRelationCandidates } from "./lib/entities";
 import { runEvidenceQuery, type EvidenceQueryTrace } from "./lib/engine";
 import {
@@ -118,8 +119,10 @@ export default function StudioV2App() {
   const [semanticState, setSemanticState] = useState<SemanticState>("off");
   const [semanticProgress, setSemanticProgress] = useState("");
   const [llmProgress, setLlmProgress] = useState("");
+  const [importJob, setImportJob] = useState<DocumentImportJobSnapshot>();
   const semanticProvider = useRef<EmbeddingProvider | undefined>(undefined);
   const localNerProvider = useRef<LocalNerProvider | undefined>(undefined);
+  const activeImportJob = useRef<DocumentImportJob | undefined>(undefined);
 
   const refresh = async (preferId?: string) => {
     const [
@@ -291,31 +294,68 @@ export default function StudioV2App() {
     setStatus(`Restored ${restored.length} notes from local snapshot.`);
   };
 
+  const commitImportedBundle = async (bundle: DocumentImportBundle): Promise<"imported" | "duplicate"> => {
+    const duplicate = await knowledgeDb.documents.where("sha256").equals(bundle.document.sha256).first();
+    if (duplicate) return "duplicate";
+    await knowledgeDb.transaction("rw", [knowledgeDb.documents, knowledgeDb.blocks], async () => {
+      await knowledgeDb.documents.put(bundle.document);
+      await knowledgeDb.blocks.bulkPut(bundle.blocks);
+    });
+    return "imported";
+  };
+
   const importKnowledge = async (fileList: FileList | null) => {
     if (!fileList) return;
     let imported = 0;
     let duplicates = 0;
+    let cancelled = 0;
     const failures: string[] = [];
     for (const file of Array.from(fileList)) {
+      const job = createDocumentImportJob(file);
+      activeImportJob.current = job;
+      const unsubscribe = job.subscribe(setImportJob);
       try {
-        const bundle = await ingestFile(file);
-        const duplicate = await knowledgeDb.documents.where("sha256").equals(bundle.document.sha256).first();
-        if (duplicate) {
-          duplicates += 1;
-          continue;
-        }
-        await knowledgeDb.transaction("rw", [knowledgeDb.documents, knowledgeDb.blocks], async () => {
-          await knowledgeDb.documents.put(bundle.document);
-          await knowledgeDb.blocks.bulkPut(bundle.blocks);
-        });
-        imported += 1;
+        const bundle = await job.start();
+        const outcome = await commitImportedBundle(bundle);
+        if (outcome === "duplicate") duplicates += 1;
+        else imported += 1;
       } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          cancelled += 1;
+          break;
+        }
         failures.push(`${file.name}: ${error instanceof Error ? error.message : "failed"}`);
+      } finally {
+        unsubscribe();
       }
     }
     await refresh();
     setView("documents");
-    setStatus(`Imported ${imported} document${imported === 1 ? "" : "s"}; ${duplicates} duplicate${duplicates === 1 ? "" : "s"} skipped${failures.length ? `; ${failures.length} failed` : ""}.`);
+    setStatus(`Imported ${imported} document${imported === 1 ? "" : "s"}; ${duplicates} duplicate${duplicates === 1 ? "" : "s"} skipped${cancelled ? `; ${cancelled} cancelled and resumable` : ""}${failures.length ? `; ${failures.length} failed` : ""}.`);
+  };
+
+  const cancelImport = () => {
+    activeImportJob.current?.cancel();
+    setImportJob(activeImportJob.current?.snapshot);
+    setStatus("Cancelled document extraction before database commit. Resume restarts safely from the retained local File object.");
+  };
+
+  const resumeImport = async () => {
+    const job = activeImportJob.current;
+    if (!job || !["cancelled", "failed"].includes(job.snapshot.status)) return;
+    const unsubscribe = job.subscribe(setImportJob);
+    try {
+      const bundle = await job.resume();
+      const outcome = await commitImportedBundle(bundle);
+      await refresh();
+      setView("documents");
+      setStatus(outcome === "duplicate" ? `Resumed ${bundle.document.name}; duplicate skipped.` : `Resumed and imported ${bundle.document.name} without partial prior state.`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Resumed import failed.");
+    } finally {
+      unsubscribe();
+      setImportJob(job.snapshot);
+    }
   };
 
   const rebuildCandidates = async () => {
@@ -567,7 +607,7 @@ export default function StudioV2App() {
 
       <main className="main-pane">
         {view === "workspace" && <WorkspaceView note={selected} notes={notes} graph={authoredGraph} mode={mode} setMode={setMode} save={saveSelected} rename={renameSelected} remove={trashSelected} openNote={openNote} />}
-        {view === "documents" && <DocumentsView documents={documents} blocks={blocks} importKnowledge={importKnowledge} />}
+        {view === "documents" && <DocumentsView documents={documents} blocks={blocks} importKnowledge={importKnowledge} importJob={importJob} cancelImport={cancelImport} resumeImport={resumeImport} />}
         {view === "graph" && <GraphStudio graph={authoredGraph} entities={entities} relations={relations} onOpen={openNote} />}
         {view === "review" && <ReviewView entities={entities} relations={relations} blocks={sources} audit={reviewAudit} rebuild={rebuildCandidates} reviewEntity={reviewEntity} reviewRelation={reviewRelation} renameEntity={renameReviewedEntity} togglePin={togglePin} mergeEntity={mergeReviewedEntity} splitEntity={splitReviewedEntity} undoAudit={undoAuditAction} runLocalNer={runLocalNer} buildSemanticSuggestions={buildSemanticSuggestions} semanticSuggestions={semanticSuggestions} reviewSemanticSuggestion={reviewSemanticSuggestion} />}
         {view === "evidence" && <EvidenceStudio question={question} setQuestion={setQuestion} evidence={evidence} trace={trace} verified={verified} entities={entities} sources={sources} semanticState={semanticState} semanticProgress={semanticProgress} enableSemantic={enableSemantic} runEvidence={runEvidence} runLocalLlm={runLocalLlm} llmProgress={llmProgress} />}
@@ -622,10 +662,13 @@ function WorkspaceView({ note, notes, graph, mode, setMode, save, rename, remove
   );
 }
 
-function DocumentsView({ documents, blocks, importKnowledge }: {
+function DocumentsView({ documents, blocks, importKnowledge, importJob, cancelImport, resumeImport }: {
   documents: SourceDocumentRecord[];
   blocks: DocumentBlockRecord[];
   importKnowledge: (files: FileList | null) => Promise<void>;
+  importJob?: DocumentImportJobSnapshot;
+  cancelImport: () => void;
+  resumeImport: () => Promise<void>;
 }) {
   return (
     <div className="single-view">
@@ -633,6 +676,7 @@ function DocumentsView({ documents, blocks, importKnowledge }: {
       <h1>Every extracted block keeps its source.</h1>
       <p className="lede">PDF pages, CSV rows, DOCX/HTML sections and text offsets are stored locally with content hashes and extractor versions.</p>
       <label className="primary import-hero">Import PDF / DOCX / CSV / HTML / text<input hidden type="file" multiple accept=".md,.txt,.csv,.html,.htm,.pdf,.docx" onChange={(event) => void importKnowledge(event.target.files)} /></label>
+      {importJob && <div className="import-job panel" aria-live="polite"><strong>{importJob.fileName}</strong><span>{importJob.status}{importJob.progress ? ` · ${importJob.progress.phase} ${importJob.progress.completed}/${importJob.progress.total}` : ""}</span>{importJob.progress?.detail && <small>{importJob.progress.detail}</small>}<div className="review-actions">{importJob.status === "running" && <button onClick={cancelImport}>Cancel import</button>}{(importJob.status === "cancelled" || importJob.status === "failed") && <button onClick={() => void resumeImport()}>Resume import</button>}</div></div>}
       <div className="document-grid">
         {documents.map((document) => {
           const sourceBlocks = blocks.filter((block) => block.documentId === document.id);
