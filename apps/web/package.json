@@ -1,23 +1,29 @@
 {
   "name": "@evidenceweave/web",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.4.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --pretty false",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
+    "@huggingface/transformers": "4.2.0",
+    "@mlc-ai/web-llm": "0.2.84",
     "cytoscape": "3.34.2",
     "dexie": "4.4.5",
     "dompurify": "3.4.14",
+    "mammoth": "1.12.2",
     "marked": "18.0.11",
+    "pdfjs-dist": "6.3.289",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
   "devDependencies": {
+    "@playwright/test": "1.63.0",
     "@types/react": "19.2.2",
     "@types/react-dom": "19.2.2",
     "@vitejs/plugin-react": "6.1.1",
