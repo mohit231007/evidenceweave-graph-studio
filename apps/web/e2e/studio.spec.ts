@@ -226,15 +226,23 @@ test("unsupported document input fails closed without creating a source record",
 
 test("cancelled worker import commits no partial state and can be resumed", async ({ page }) => {
   test.setTimeout(60_000);
-  const input = page.locator('aside.sidebar input[type="file"]').first();
-  const rows = ["id,name", ...Array.from({ length: 3000 }, (_, index) => `${index + 1},Person ${index + 1}`)].join("\n");
-  await input.setInputFiles({ name: "resumable.csv", mimeType: "text/csv", buffer: Buffer.from(rows) });
+  // Open the job UI before starting extraction so cancellation is exercised while
+  // the worker is genuinely active instead of racing navigation after a fast import.
   await navButton(page, "Documents").click();
-  const cancel = page.getByRole("button", { name: "Cancel import", exact: true });
-  await expect(cancel).toBeVisible({ timeout: 10_000 });
-  // Progress updates legitimately rerender the job row. dispatchEvent verifies the
-  // same user handler without Playwright waiting for animation/stability between frames.
-  await cancel.dispatchEvent("click");
+  const input = page.locator('aside.sidebar input[type="file"]').first();
+  const rows = ["id,name", ...Array.from({ length: 10_000 }, (_, index) => `${index + 1},Person ${index + 1}`)].join("\n");
+  await input.setInputFiles({ name: "resumable.csv", mimeType: "text/csv", buffer: Buffer.from(rows) });
+
+  // Progress updates can replace the visual job row between automation frames.
+  // Selecting and clicking the current Cancel button in one browser task proves
+  // the same user event path without relying on a stale DOM node.
+  await page.waitForFunction(() => {
+    const cancel = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "Cancel import");
+    if (!cancel) return false;
+    cancel.click();
+    return true;
+  }, undefined, { timeout: 10_000, polling: "raf" });
+
   await expect(page.getByRole("button", { name: "Resume import", exact: true })).toBeVisible();
   await expect(page.locator(".document-card").filter({ hasText: "resumable.csv" })).toHaveCount(0);
   await page.getByRole("button", { name: "Resume import", exact: true }).click();
