@@ -1,0 +1,37 @@
+name: Final cancel journey patch
+
+on:
+  push:
+    branches: [feat/v1-completion-hardening]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: feat/v1-completion-hardening
+      - name: Make cancel-resume browser journey atomic
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          spec = Path('apps/web/e2e/studio.spec.ts')
+          text = spec.read_text()
+          old = '''test("cancelled worker import commits no partial state and can be resumed", async ({ page }) => {\n  test.setTimeout(60_000);\n  const input = page.locator('aside.sidebar input[type="file"]').first();\n  const rows = ["id,name", ...Array.from({ length: 3000 }, (_, index) => `${index + 1},Person ${index + 1}`)].join("\\n");\n  await input.setInputFiles({ name: "resumable.csv", mimeType: "text/csv", buffer: Buffer.from(rows) });\n  await navButton(page, "Documents").click();\n  const cancel = page.getByRole("button", { name: "Cancel import", exact: true });\n  await expect(cancel).toBeVisible({ timeout: 10_000 });\n  // Progress updates legitimately rerender the job row. dispatchEvent verifies the\n  // same user handler without Playwright waiting for animation/stability between frames.\n  await cancel.dispatchEvent("click");\n  await expect(page.getByRole("button", { name: "Resume import", exact: true })).toBeVisible();\n  await expect(page.locator(".document-card").filter({ hasText: "resumable.csv" })).toHaveCount(0);\n  await page.getByRole("button", { name: "Resume import", exact: true }).click();\n  await expect(page.locator(".document-card").filter({ hasText: "resumable.csv" })).toBeVisible({ timeout: 45_000 });\n});'''
+          new = '''test("cancelled worker import commits no partial state and can be resumed", async ({ page }) => {\n  test.setTimeout(60_000);\n  // Open the job UI before starting extraction so cancellation is exercised while\n  // the worker is genuinely active instead of racing navigation after a fast import.\n  await navButton(page, "Documents").click();\n  const input = page.locator('aside.sidebar input[type="file"]').first();\n  const rows = ["id,name", ...Array.from({ length: 10_000 }, (_, index) => `${index + 1},Person ${index + 1}`)].join("\\n");\n  await input.setInputFiles({ name: "resumable.csv", mimeType: "text/csv", buffer: Buffer.from(rows) });\n\n  // Progress updates can replace the visual job row between automation frames.\n  // Selecting and clicking the current Cancel button in one browser task proves\n  // the same user event path without relying on a stale DOM node.\n  await page.waitForFunction(() => {\n    const cancel = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "Cancel import");\n    if (!cancel) return false;\n    cancel.click();\n    return true;\n  }, undefined, { timeout: 10_000, polling: "raf" });\n\n  await expect(page.getByRole("button", { name: "Resume import", exact: true })).toBeVisible();\n  await expect(page.locator(".document-card").filter({ hasText: "resumable.csv" })).toHaveCount(0);\n  await page.getByRole("button", { name: "Resume import", exact: true }).click();\n  await expect(page.locator(".document-card").filter({ hasText: "resumable.csv" })).toBeVisible({ timeout: 45_000 });\n});'''
+          if old not in text:
+              raise SystemExit('cancel journey marker missing')
+          spec.write_text(text.replace(old, new, 1))
+          PY
+      - name: Commit final cancel journey fix
+        run: |
+          if git diff --quiet; then exit 0; fi
+          git config user.name "EvidenceWeave CI"
+          git config user.email "actions@users.noreply.github.com"
+          git add apps/web/e2e/studio.spec.ts
+          git commit -m "test: make cancel-resume browser journey atomic"
+          git push origin HEAD:feat/v1-completion-hardening
