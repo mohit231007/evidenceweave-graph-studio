@@ -40,7 +40,7 @@ import {
 import { undoReviewAudit } from "./lib/review-undo";
 import { createLocalNerProvider, extractLocalModelEntityCandidates, type LocalNerProvider } from "./lib/local-ner";
 import { buildSemanticLinkSuggestions, reviewSemanticLink } from "./lib/semantic-links";
-import { loadWorkspaceState, saveWorkspaceState, touchRecentNote } from "./lib/workspace-state";
+import { ensureWorkspaceSchema, loadWorkspaceState, saveWorkspaceState, touchRecentNote } from "./lib/workspace-state";
 import {
   knowledgeDb,
   type CanvasRecord,
@@ -174,6 +174,7 @@ export default function StudioV2App() {
 
   useEffect(() => {
     void seedIfEmpty().then(async () => {
+      await ensureWorkspaceSchema(await db.notes.toArray());
       const saved = await loadWorkspaceState();
       await refresh(saved.activeNoteId);
       const validViews: MainView[] = ["workspace", "documents", "graph", "review", "evidence", "canvas", "library"];
