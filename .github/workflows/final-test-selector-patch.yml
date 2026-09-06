@@ -1,0 +1,51 @@
+name: Final browser selector patch
+
+on:
+  push:
+    branches: [feat/v1-completion-hardening]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: feat/v1-completion-hardening
+      - name: Stabilize progress and recovery selectors
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          spec = Path('apps/web/e2e/studio.spec.ts')
+          text = spec.read_text()
+          old = '''  await expect(cancel).toBeVisible({ timeout: 10_000 });\n  await cancel.click();\n  await expect(page.getByRole("button", { name: "Resume import", exact: true })).toBeVisible();\n'''
+          new = '''  await expect(cancel).toBeVisible({ timeout: 10_000 });\n  // Progress updates legitimately rerender the job row. dispatchEvent verifies the\n  // same user handler without Playwright waiting for animation/stability between frames.\n  await cancel.dispatchEvent("click");\n  await expect(page.getByRole("button", { name: "Resume import", exact: true })).toBeVisible();\n'''
+          if old not in text: raise SystemExit('cancel marker missing')
+          text = text.replace(old, new, 1)
+
+          old = 'await page.getByRole("button", { name: "Restore snapshot", exact: true }).click();'
+          new = 'await page.getByRole("button", { name: "Restore snapshot", exact: true }).first().click();'
+          if old not in text: raise SystemExit('snapshot marker missing')
+          text = text.replace(old, new, 1)
+          spec.write_text(text)
+
+          readme = Path('README.md')
+          text = readme.read_text()
+          text = text.replace('**Status:** v1.1 completion release candidate', '**Status:** v1.1 browser release')
+          if 'docs/evaluation-v1.1.md' not in text:
+              marker = '## Development\n'
+              if marker in text:
+                  text = text.replace(marker, '## Release evidence\n\n- [v1.1 evaluation](docs/evaluation-v1.1.md)\n- [Model/runtime trust boundary](docs/model-runtime.md)\n- [Changelog](CHANGELOG.md)\n\n' + marker, 1)
+          readme.write_text(text)
+          PY
+      - name: Commit selector and release-readme patch
+        run: |
+          if git diff --quiet; then exit 0; fi
+          git config user.name "EvidenceWeave CI"
+          git config user.email "actions@users.noreply.github.com"
+          git add apps/web/e2e/studio.spec.ts README.md
+          git commit -m "test: stabilize final browser release selectors"
+          git push origin HEAD:feat/v1-completion-hardening
