@@ -145,7 +145,9 @@ test("imports structured evidence in a worker, audits review, reopens decisions,
   const relationSection = page.locator(".review-columns > section").nth(1);
   const firstAccept = entitySection.getByRole("button", { name: "Accept", exact: true }).first();
   await expect(firstAccept).toBeVisible();
-  await firstAccept.click();
+  while (await entitySection.getByRole("button", { name: "Accept", exact: true }).count()) {
+    await entitySection.getByRole("button", { name: "Accept", exact: true }).first().click();
+  }
   const relationAccept = relationSection.getByRole("button", { name: "Accept", exact: true }).first();
   await expect(relationAccept).toBeVisible();
   await relationAccept.click();

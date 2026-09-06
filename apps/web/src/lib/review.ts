@@ -31,6 +31,17 @@ export async function reviewEntity(record: EntityCandidateRecord, nextStatus: Re
 }
 
 export async function reviewRelation(record: RelationCandidateRecord, nextStatus: ReviewStatus): Promise<RelationCandidateRecord> {
+  if (nextStatus === "accepted") {
+    if (!record.evidenceBlockIds.length) throw new Error("A relationship cannot be accepted without source-block provenance.");
+    const [source, target] = await Promise.all([
+      knowledgeDb.entities.get(record.sourceEntityId),
+      knowledgeDb.entities.get(record.targetEntityId)
+    ]);
+    if (!source || !target) throw new Error("A relationship cannot be accepted when an endpoint entity is missing.");
+    if (source.status !== "accepted" || target.status !== "accepted" || source.mergedIntoId || target.mergedIntoId) {
+      throw new Error("Accept both endpoint entities before accepting this relationship.");
+    }
+  }
   const updated = { ...record, status: nextStatus, updatedAt: now() };
   const action: ReviewAuditRecord["action"] = nextStatus === "accepted" ? "accept" : nextStatus === "rejected" ? "reject" : "reopen";
   await knowledgeDb.transaction("rw", [knowledgeDb.relations, knowledgeDb.reviewAudit], async () => {
