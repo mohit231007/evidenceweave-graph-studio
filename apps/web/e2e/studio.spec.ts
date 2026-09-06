@@ -143,12 +143,12 @@ test("imports structured evidence in a worker, audits review, reopens decisions,
   await expect(page.getByText("Inference proposes. You decide.", { exact: true })).toBeVisible();
   const entitySection = page.locator(".review-columns > section").first();
   const relationSection = page.locator(".review-columns > section").nth(1);
-  const firstAccept = entitySection.getByRole("button", { name: "Accept", exact: true }).first();
-  await expect(firstAccept).toBeVisible();
-  while (await entitySection.getByRole("button", { name: "Accept", exact: true }).count()) {
-    await entitySection.getByRole("button", { name: "Accept", exact: true }).first().click();
+  for (const endpoint of ["Microsoft", "GitHub"]) {
+    const card = entitySection.locator(".review-card").filter({ hasText: endpoint }).first();
+    await expect(card).toBeVisible();
+    await card.getByRole("button", { name: "Accept", exact: true }).click();
   }
-  const relationAccept = relationSection.getByRole("button", { name: "Accept", exact: true }).first();
+  const relationAccept = relationSection.locator(".review-card").filter({ hasText: "acquired" }).first().getByRole("button", { name: "Accept", exact: true });
   await expect(relationAccept).toBeVisible();
   await relationAccept.click();
 

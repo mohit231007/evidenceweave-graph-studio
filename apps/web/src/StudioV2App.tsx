@@ -597,6 +597,13 @@ export default function StudioV2App() {
     void loadWorkspaceState().then((current) => knowledgeDb.workspaceState.put(touchRecentNote(current, id)));
   };
 
+  const switchView = async (nextView: MainView) => {
+    if (workspaceHydrated.current) {
+      await saveWorkspaceState({ activeView: nextView, activeNoteId: selectedId || undefined });
+    }
+    setView(nextView);
+  };
+
   return (
     <div className="app-shell v1-shell v2-shell">
       <header className="topbar">
@@ -604,7 +611,7 @@ export default function StudioV2App() {
         <div className="brand-copy"><strong>EvidenceWeave</strong><span>Graph Studio v1.1</span></div>
         <nav className="view-tabs" aria-label="Primary views">
           {(["workspace", "documents", "graph", "review", "evidence", "canvas", "library"] as MainView[]).map((item) => (
-            <button key={item} className={view === item ? "active" : ""} onClick={() => setView(item)}>
+            <button key={item} className={view === item ? "active" : ""} onClick={() => void switchView(item)}>
               {item[0].toUpperCase() + item.slice(1)}
             </button>
           ))}
