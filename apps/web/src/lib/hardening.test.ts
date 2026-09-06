@@ -1,12 +1,26 @@
 import { describe, expect, it } from "vitest";
 import { validateRelationProofs } from "./engine";
 import { validatePortableWorkspace } from "./portable";
+import { reconcileMergedRelation } from "./review";
 import { addCanvasEdge, assignCanvasGroup, createSavedView, groupNotesForView, importCanvas, removeCanvasNode } from "./workspace";
 import type { NoteRecord } from "./core";
 import type { RelationPathProof } from "./reasoning";
-import type { CanvasRecord } from "./store";
+import type { CanvasRecord, RelationCandidateRecord } from "./store";
 
 const note = (id: string, title: string, status: string): NoteRecord => ({ id, title, path: `${title}.md`, markdown: `---\nstatus: ${status}\n---\n# ${title}`, createdAt: "2026-01-01", updatedAt: "2026-01-01" });
+const relation = (patch: Partial<RelationCandidateRecord> = {}): RelationCandidateRecord => ({
+  id: "a::uses::b",
+  sourceEntityId: "a",
+  targetEntityId: "b",
+  relation: "uses",
+  evidenceBlockIds: ["e1"],
+  confidence: 0.8,
+  extractorVersion: "deterministic-relation-v2",
+  status: "accepted",
+  observedAt: "2026-01-01T00:00:00.000Z",
+  updatedAt: "2026-01-01T00:00:00.000Z",
+  ...patch
+});
 
 describe("proof validation", () => {
   it("fails closed when a hop references a missing source block", () => {
@@ -66,5 +80,25 @@ describe("workspace parity contracts", () => {
     const groups = groupNotesForView([note("1", "One", "todo"), note("2", "Two", "done"), note("3", "Three", "todo")], view);
     expect([...groups.keys()]).toEqual(["done", "todo"]);
     expect(groups.get("todo")).toHaveLength(2);
+  });
+});
+
+describe("entity merge relation safety", () => {
+  it("unions provenance and reopens a collided relation when review states disagree", () => {
+    const merged = reconcileMergedRelation(
+      relation({ evidenceBlockIds: ["e1"], status: "accepted", confidence: 0.8, validFrom: "2020-01-01" }),
+      relation({ evidenceBlockIds: ["e2"], status: "rejected", confidence: 0.95, validFrom: "2021-01-01", extractorVersion: "model-v1" })
+    );
+    expect(merged.evidenceBlockIds.sort()).toEqual(["e1", "e2"]);
+    expect(merged.confidence).toBe(0.95);
+    expect(merged.status).toBe("pending");
+    expect(merged.validFrom).toBeUndefined();
+    expect(merged.extractorVersion).toBe("merge-reconciled-v1");
+  });
+
+  it("preserves accepted review state when both collided relations were accepted", () => {
+    const merged = reconcileMergedRelation(relation({ evidenceBlockIds: ["e1"] }), relation({ evidenceBlockIds: ["e2"] }));
+    expect(merged.status).toBe("accepted");
+    expect(merged.evidenceBlockIds).toEqual(["e1", "e2"]);
   });
 });
