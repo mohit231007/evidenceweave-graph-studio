@@ -34,6 +34,7 @@ import {
   reviewEntity as persistEntityReview,
   reviewRelation as persistRelationReview,
   setEntityPinned,
+  setRelationValidity,
   splitEntity
 } from "./lib/review";
 import { undoReviewAudit } from "./lib/review-undo";
@@ -431,6 +432,32 @@ export default function StudioV2App() {
     await refresh();
   };
 
+  const reopenReviewedEntity = async (entity: EntityCandidateRecord) => {
+    await persistEntityReview(entity, "pending");
+    await refresh();
+    setStatus(`Reopened “${entity.canonicalName}” for review.`);
+  };
+
+  const reopenReviewedRelation = async (relation: RelationCandidateRecord) => {
+    await persistRelationReview(relation, "pending");
+    await refresh();
+    setStatus(`Reopened relationship “${relation.relation}” for review.`);
+  };
+
+  const editRelationValidity = async (relation: RelationCandidateRecord) => {
+    const validFrom = prompt("Relationship valid from (ISO date, blank for unknown)", relation.validFrom ?? "");
+    if (validFrom === null) return;
+    const validTo = prompt("Relationship valid to (ISO date, blank for open-ended/unknown)", relation.validTo ?? "");
+    if (validTo === null) return;
+    try {
+      await setRelationValidity(relation, validFrom, validTo);
+      await refresh();
+      setStatus("Updated reviewed relationship validity with an auditable before/after snapshot.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Relationship validity update failed.");
+    }
+  };
+
   const renameReviewedEntity = async (entity: EntityCandidateRecord) => {
     const desired = prompt("Canonical entity name", entity.canonicalName)?.trim();
     if (!desired || desired === entity.canonicalName) return;
@@ -609,9 +636,9 @@ export default function StudioV2App() {
         {view === "workspace" && <WorkspaceView note={selected} notes={notes} graph={authoredGraph} mode={mode} setMode={setMode} save={saveSelected} rename={renameSelected} remove={trashSelected} openNote={openNote} />}
         {view === "documents" && <DocumentsView documents={documents} blocks={blocks} importKnowledge={importKnowledge} importJob={importJob} cancelImport={cancelImport} resumeImport={resumeImport} />}
         {view === "graph" && <GraphStudio graph={authoredGraph} entities={entities} relations={relations} onOpen={openNote} />}
-        {view === "review" && <ReviewView entities={entities} relations={relations} blocks={sources} audit={reviewAudit} rebuild={rebuildCandidates} reviewEntity={reviewEntity} reviewRelation={reviewRelation} renameEntity={renameReviewedEntity} togglePin={togglePin} mergeEntity={mergeReviewedEntity} splitEntity={splitReviewedEntity} undoAudit={undoAuditAction} runLocalNer={runLocalNer} buildSemanticSuggestions={buildSemanticSuggestions} semanticSuggestions={semanticSuggestions} reviewSemanticSuggestion={reviewSemanticSuggestion} />}
+        {view === "review" && <ReviewView entities={entities} relations={relations} blocks={sources} audit={reviewAudit} rebuild={rebuildCandidates} reviewEntity={reviewEntity} reviewRelation={reviewRelation} reopenEntity={reopenReviewedEntity} reopenRelation={reopenReviewedRelation} editRelationValidity={editRelationValidity} renameEntity={renameReviewedEntity} togglePin={togglePin} mergeEntity={mergeReviewedEntity} splitEntity={splitReviewedEntity} undoAudit={undoAuditAction} runLocalNer={runLocalNer} buildSemanticSuggestions={buildSemanticSuggestions} semanticSuggestions={semanticSuggestions} reviewSemanticSuggestion={reviewSemanticSuggestion} />}
         {view === "evidence" && <EvidenceStudio question={question} setQuestion={setQuestion} evidence={evidence} trace={trace} verified={verified} entities={entities} sources={sources} semanticState={semanticState} semanticProgress={semanticProgress} enableSemantic={enableSemantic} runEvidence={runEvidence} runLocalLlm={runLocalLlm} llmProgress={llmProgress} />}
-        {view === "canvas" && <CanvasStudio canvases={canvases} notes={notes} selected={selected} refresh={refresh} />}
+        {view === "canvas" && <CanvasStudio canvases={canvases} notes={notes} documents={documents} selected={selected} refresh={refresh} />}
         {view === "library" && <LibraryStudio notes={notes} graph={authoredGraph} documents={documents} entities={entities} relations={relations} views={views} trash={trash} snapshots={snapshots} queryTraces={queryTraces} reviewAudit={reviewAudit} restoreTrash={restoreTrash} restoreSnapshot={restoreSnapshot} openNote={openNote} refresh={refresh} />}
       </main>
 
@@ -754,7 +781,7 @@ function GraphStudio({ graph, entities, relations, onOpen }: {
   );
 }
 
-function ReviewView({ entities, relations, blocks, audit, rebuild, reviewEntity, reviewRelation, renameEntity: renameEntityAction, togglePin, mergeEntity, splitEntity: splitEntityAction, undoAudit, runLocalNer, buildSemanticSuggestions, semanticSuggestions, reviewSemanticSuggestion }: {
+function ReviewView({ entities, relations, blocks, audit, rebuild, reviewEntity, reviewRelation, reopenEntity, reopenRelation, editRelationValidity, renameEntity: renameEntityAction, togglePin, mergeEntity, splitEntity: splitEntityAction, undoAudit, runLocalNer, buildSemanticSuggestions, semanticSuggestions, reviewSemanticSuggestion }: {
   entities: EntityCandidateRecord[];
   relations: RelationCandidateRecord[];
   blocks: UnifiedSourceBlock[];
@@ -762,6 +789,9 @@ function ReviewView({ entities, relations, blocks, audit, rebuild, reviewEntity,
   rebuild: () => Promise<void>;
   reviewEntity: (entity: EntityCandidateRecord, accepted: boolean) => Promise<void>;
   reviewRelation: (relation: RelationCandidateRecord, accepted: boolean) => Promise<void>;
+  reopenEntity: (entity: EntityCandidateRecord) => Promise<void>;
+  reopenRelation: (relation: RelationCandidateRecord) => Promise<void>;
+  editRelationValidity: (relation: RelationCandidateRecord) => Promise<void>;
   renameEntity: (entity: EntityCandidateRecord) => Promise<void>;
   togglePin: (entity: EntityCandidateRecord) => Promise<void>;
   mergeEntity: (entity: EntityCandidateRecord) => Promise<void>;
@@ -792,7 +822,7 @@ function ReviewView({ entities, relations, blocks, audit, rebuild, reviewEntity,
               <div className="review-title"><strong>{entity.pinned ? "★ " : ""}{entity.canonicalName}</strong><small>{entity.entityType} · {Math.round(entity.confidence * 100)}% · {entity.status}</small></div>
               <p>{entity.evidenceBlockIds.slice(0, 3).map((id) => blockMap.get(id)?.title).filter(Boolean).join(" · ")}</p>
               <div className="review-actions wrap-actions">
-                {entity.status === "pending" && <><button onClick={() => void reviewEntity(entity, true)}>Accept</button><button onClick={() => void reviewEntity(entity, false)}>Reject</button></>}
+                {entity.status === "pending" ? <><button onClick={() => void reviewEntity(entity, true)}>Accept</button><button onClick={() => void reviewEntity(entity, false)}>Reject</button></> : <button onClick={() => void reopenEntity(entity)}>Reopen</button>}
                 <button onClick={() => void renameEntityAction(entity)}>Rename</button>
                 <button onClick={() => void togglePin(entity)}>{entity.pinned ? "Unpin" : "Pin"}</button>
                 <button onClick={() => void mergeEntity(entity)}>Merge</button>
@@ -806,8 +836,8 @@ function ReviewView({ entities, relations, blocks, audit, rebuild, reviewEntity,
           {visibleRelations.slice(0, 100).map((relation) => (
             <article className="review-card" key={relation.id}>
               <div><strong>{entityMap.get(relation.sourceEntityId)?.canonicalName ?? relation.sourceEntityId}</strong><small> {relation.relation} → </small><strong>{entityMap.get(relation.targetEntityId)?.canonicalName ?? relation.targetEntityId}</strong></div>
-              <p>{relation.evidenceBlockIds.map((id) => blockMap.get(id)?.title).filter(Boolean).slice(0, 3).join(" · ")} · {Math.round(relation.confidence * 100)}% · {relation.status}</p>
-              {relation.status === "pending" && <div className="review-actions"><button onClick={() => void reviewRelation(relation, true)}>Accept</button><button onClick={() => void reviewRelation(relation, false)}>Reject</button></div>}
+              <p>{relation.evidenceBlockIds.map((id) => blockMap.get(id)?.title).filter(Boolean).slice(0, 3).join(" · ")} · {Math.round(relation.confidence * 100)}% · {relation.status}{relation.validFrom || relation.validTo ? ` · validity ${relation.validFrom ?? "…"} → ${relation.validTo ?? "…"}` : ""}</p>
+              <div className="review-actions wrap-actions">{relation.status === "pending" ? <><button onClick={() => void reviewRelation(relation, true)}>Accept</button><button onClick={() => void reviewRelation(relation, false)}>Reject</button></> : <button onClick={() => void reopenRelation(relation)}>Reopen</button>}<button onClick={() => void editRelationValidity(relation)}>Edit validity</button></div>
             </article>
           ))}
           <h2>Semantic suggestions <span>{semanticSuggestions.length}</span></h2>
@@ -858,7 +888,7 @@ function EvidenceStudio({ question, setQuestion, evidence, trace, verified, enti
           {trace.paths.map((path, index) => (
             <div className="path-proof" key={`${path.sourceEntityId}-${path.targetEntityId}-${index}`}>
               <strong>{entityMap.get(path.sourceEntityId)?.canonicalName ?? path.sourceEntityId} ⇄ {entityMap.get(path.targetEntityId)?.canonicalName ?? path.targetEntityId}</strong>
-              {path.hops.map((hop) => <div className="path-hop" key={hop.relationId}><span>{entityMap.get(hop.fromEntityId)?.canonicalName ?? hop.fromEntityId}</span><b> —{hop.relation}→ </b><span>{entityMap.get(hop.toEntityId)?.canonicalName ?? hop.toEntityId}</span><small>{hop.evidenceBlockIds.map((id) => blockMap.get(id)?.title ?? id).join(" · ")}</small></div>)}
+              {path.hops.map((hop) => <div className="path-hop" key={hop.relationId}><span>{entityMap.get(hop.fromEntityId)?.canonicalName ?? hop.fromEntityId}</span><b> —{hop.relation}→ </b><span>{entityMap.get(hop.toEntityId)?.canonicalName ?? hop.toEntityId}</span><small>accepted inferred · {hop.evidenceBlockIds.map((id) => blockMap.get(id)?.title ?? id).join(" · ")}</small></div>)}
             </div>
           ))}
           {trace.diagnostics.missingPathPairs.length > 0 && <div className="claim-warning">Missing reviewed graph paths: {trace.diagnostics.missingPathPairs.join(", ")}. EvidenceWeave does not invent the missing hops.</div>}
@@ -885,9 +915,10 @@ function EvidenceStudio({ question, setQuestion, evidence, trace, verified, enti
   );
 }
 
-function CanvasStudio({ canvases, notes, selected, refresh }: {
+function CanvasStudio({ canvases, notes, documents, selected, refresh }: {
   canvases: CanvasRecord[];
   notes: NoteRecord[];
+  documents: SourceDocumentRecord[];
   selected?: NoteRecord;
   refresh: () => Promise<void>;
 }) {
@@ -914,6 +945,20 @@ function CanvasStudio({ canvases, notes, selected, refresh }: {
       setActiveId(current.id);
     }
     const next = addCanvasNode(current, { kind: "note", refId: selected.id, label: selected.title, x: 80 + current.nodes.length * 35, y: 70 + current.nodes.length * 25, width: 190, height: 90 });
+    await knowledgeDb.canvases.put(next);
+    await refresh();
+  };
+
+  const addLatestDocument = async () => {
+    const document = documents[0];
+    if (!document) return;
+    let current = canvas;
+    if (!current) {
+      current = createCanvas();
+      await knowledgeDb.canvases.put(current);
+      setActiveId(current.id);
+    }
+    const next = addCanvasNode(current, { kind: "document", refId: document.id, label: document.name, x: 110 + current.nodes.length * 35, y: 100 + current.nodes.length * 25, width: 210, height: 90 });
     await knowledgeDb.canvases.put(next);
     await refresh();
   };
@@ -981,7 +1026,7 @@ function CanvasStudio({ canvases, notes, selected, refresh }: {
     <div className="single-view canvas-view">
       <div className="hero-row">
         <div><span className="eyebrow">Open local canvas</span><h1>Arrange knowledge spatially.</h1><p>Canvas metadata is local/exportable and never replaces the underlying Markdown.</p></div>
-        <div className="canvas-actions"><button onClick={() => void ensureCanvas()}>New canvas</button><button className="primary" onClick={() => void addSelected()} disabled={!selected}>Add current note</button><button onClick={() => void addLabel()} disabled={!canvas}>Add label</button><button onClick={() => void connectLastTwo()} disabled={!canvas}>Connect last two</button><button onClick={() => void groupAll()} disabled={!canvas}>Group</button><button onClick={() => void resizeLast()} disabled={!canvas}>Resize last</button><button onClick={() => void removeLast()} disabled={!canvas}>Remove last</button><button onClick={exportActive} disabled={!canvas}>Export</button><label className="canvas-file">Import<input hidden type="file" accept=".json,application/json" onChange={(event) => void importOne(event.target.files?.[0])} /></label></div>
+        <div className="canvas-actions"><button onClick={() => void ensureCanvas()}>New canvas</button><button className="primary" onClick={() => void addSelected()} disabled={!selected}>Add current note</button><button onClick={() => void addLatestDocument()} disabled={!documents.length}>Add latest document</button><button onClick={() => void addLabel()} disabled={!canvas}>Add label</button><button onClick={() => void connectLastTwo()} disabled={!canvas}>Connect last two</button><button onClick={() => void groupAll()} disabled={!canvas}>Group</button><button onClick={() => void resizeLast()} disabled={!canvas}>Resize last</button><button onClick={() => void removeLast()} disabled={!canvas}>Remove last</button><button onClick={exportActive} disabled={!canvas}>Export</button><label className="canvas-file">Import<input hidden type="file" accept=".json,application/json" onChange={(event) => void importOne(event.target.files?.[0])} /></label></div>
       </div>
       <div className="canvas-tabs">{canvases.map((item) => <button className={item.id === activeId ? "active" : ""} key={item.id} onClick={() => setActiveId(item.id)}>{item.title}</button>)}</div>
       <div className="infinite-canvas">
@@ -998,7 +1043,7 @@ function CanvasStudio({ canvases, notes, selected, refresh }: {
               void move(node.id, Math.max(0, event.clientX - parent.left - node.width / 2), Math.max(0, event.clientY - parent.top - 20));
             }}
           >
-            <strong>{node.label}</strong><small>{node.kind}{node.refId && notes.some((note) => note.id === node.refId) ? " · linked" : ""}{node.groupId ? " · grouped" : ""}</small>
+            <strong>{node.label}</strong><small>{node.kind}{node.refId && (notes.some((note) => note.id === node.refId) || documents.some((document) => document.id === node.refId)) ? " · linked" : ""}{node.groupId ? " · grouped" : ""}</small>
           </article>
         ))}
       </div>
