@@ -44,13 +44,14 @@ export async function undoReviewAudit(auditId: string): Promise<void> {
   }
 
   if (audit.action === "merge") {
-    const before = parse<{ primary: EntityCandidateRecord; secondary: EntityCandidateRecord; affectedRelations: RelationCandidateRecord[] }>(audit.beforeJson);
+    const before = parse<{ primary: EntityCandidateRecord; secondary: EntityCandidateRecord; affectedRelations: RelationCandidateRecord[]; collidedRelations?: RelationCandidateRecord[] }>(audit.beforeJson);
     const after = parse<{ primary: EntityCandidateRecord; secondary: EntityCandidateRecord; rewritten: RelationCandidateRecord[] }>(audit.afterJson);
     if (!before?.primary?.id || !before.secondary?.id || !Array.isArray(before.affectedRelations)) throw new Error("Merge audit snapshot is malformed.");
     await knowledgeDb.transaction("rw", [knowledgeDb.entities, knowledgeDb.relations, knowledgeDb.reviewAudit], async () => {
       await knowledgeDb.entities.bulkPut([before.primary, before.secondary]);
       if (after?.rewritten?.length) await knowledgeDb.relations.bulkDelete(after.rewritten.map((relation) => relation.id));
-      if (before.affectedRelations.length) await knowledgeDb.relations.bulkPut(before.affectedRelations);
+      const originals = [...before.affectedRelations, ...(before.collidedRelations ?? [])];
+      if (originals.length) await knowledgeDb.relations.bulkPut(originals);
       await knowledgeDb.reviewAudit.add(undoMarker(audit));
     });
     return;
