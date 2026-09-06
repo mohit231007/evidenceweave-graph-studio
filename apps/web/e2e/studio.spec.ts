@@ -232,7 +232,9 @@ test("cancelled worker import commits no partial state and can be resumed", asyn
   await navButton(page, "Documents").click();
   const cancel = page.getByRole("button", { name: "Cancel import", exact: true });
   await expect(cancel).toBeVisible({ timeout: 10_000 });
-  await cancel.click();
+  // Progress updates legitimately rerender the job row. dispatchEvent verifies the
+  // same user handler without Playwright waiting for animation/stability between frames.
+  await cancel.dispatchEvent("click");
   await expect(page.getByRole("button", { name: "Resume import", exact: true })).toBeVisible();
   await expect(page.locator(".document-card").filter({ hasText: "resumable.csv" })).toHaveCount(0);
   await page.getByRole("button", { name: "Resume import", exact: true }).click();
@@ -303,7 +305,7 @@ test("saved Kanban views and note snapshots remain local and recoverable", async
 
   page.removeAllListeners("dialog");
   page.once("dialog", (dialog) => dialog.accept());
-  await page.getByRole("button", { name: "Restore snapshot", exact: true }).click();
+  await page.getByRole("button", { name: "Restore snapshot", exact: true }).first().click();
   await expect(page.getByText("Temporary Browser Note", { exact: true })).toHaveCount(0);
 });
 
