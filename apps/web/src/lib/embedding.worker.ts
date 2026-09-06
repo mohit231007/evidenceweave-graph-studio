@@ -1,5 +1,7 @@
 /// <reference lib="webworker" />
 
+import { browserHasWebGpu, selectLocalModelDevice } from "./runtime-device";
+
 interface InitMessage { type: "init"; modelId: string; revision: string; }
 interface EmbedMessage { type: "embed"; requestId: string; texts: string[]; }
 interface CancelMessage { type: "cancel"; requestId: string; }
@@ -11,9 +13,9 @@ const cancelled = new Set<string>();
 async function initialize(modelId: string, revision: string) {
   try {
     const { pipeline } = await import("@huggingface/transformers");
-    const supportsWebGpu = typeof navigator !== "undefined" && "gpu" in navigator;
-    extractor = await pipeline("feature-extraction", modelId, { device: supportsWebGpu ? "webgpu" : "wasm", dtype: "q8", revision }) as unknown as typeof extractor;
-    self.postMessage({ type: "ready", device: supportsWebGpu ? "webgpu" : "wasm", modelId, revision });
+    const device = selectLocalModelDevice(browserHasWebGpu());
+    extractor = await pipeline("feature-extraction", modelId, { device, dtype: "q8", revision }) as unknown as typeof extractor;
+    self.postMessage({ type: "ready", device, modelId, revision });
   } catch (error) {
     self.postMessage({ type: "error", error: error instanceof Error ? error.message : "Embedding worker initialization failed." });
   }
