@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { bm25Rank, graphRank, reciprocalRankFusion } from "./hybrid";
 import { runEvidenceQuery } from "./engine";
-import { evaluateRetrieval } from "./eval";
+import { evaluateRetrieval, pathRecall } from "./eval";
+import { verifyExtractive } from "./verify";
 import { goldenBlocks, goldenEntities, goldenQuestions, goldenRelations } from "./golden";
 
 describe("golden retrieval corpus", () => {
@@ -14,6 +15,7 @@ describe("golden retrieval corpus", () => {
     const metrics = evaluateRetrieval(cases, 5);
     expect(metrics.recallAtK).toBeGreaterThanOrEqual(.75);
     expect(metrics.mrr).toBeGreaterThanOrEqual(.7);
+    expect(metrics.ndcgAtK).toBeGreaterThanOrEqual(.7);
   });
 
   it("keeps deterministic BM25+graph RRF at least as strong as the best enabled single channel on the golden corpus", () => {
@@ -31,10 +33,9 @@ describe("golden retrieval corpus", () => {
     const lexical = evaluateRetrieval(lexicalCases, 5);
     const graph = evaluateRetrieval(graphCases, 5);
     const fused = evaluateRetrieval(fusedCases, 5);
-    const bestRecall = Math.max(lexical.recallAtK, graph.recallAtK);
-    const bestMrr = Math.max(lexical.mrr, graph.mrr);
-    expect(fused.recallAtK).toBeGreaterThanOrEqual(bestRecall);
-    expect(fused.mrr).toBeGreaterThanOrEqual(bestMrr);
+    expect(fused.recallAtK).toBeGreaterThanOrEqual(Math.max(lexical.recallAtK, graph.recallAtK));
+    expect(fused.mrr).toBeGreaterThanOrEqual(Math.max(lexical.mrr, graph.mrr));
+    expect(fused.ndcgAtK).toBeGreaterThanOrEqual(Math.max(lexical.ndcgAtK, graph.ndcgAtK));
   });
 
   it("retrieves every sourced hop for the multi-hop golden question", async () => {
@@ -44,10 +45,20 @@ describe("golden retrieval corpus", () => {
     expect(ids.has("g-openai-microsoft")).toBe(true);
     expect(result.trace.route.mode).toBe("multi-hop");
     expect(result.trace.paths[0]?.hops).toHaveLength(2);
+    const actualEdges = result.trace.paths.flatMap((path) => path.hops.map((hop) => hop.relationId));
+    expect(pathRecall(["r-atlas-openai", "r-openai-microsoft"], actualEdges)).toBe(1);
   });
 
   it("does not inject community evidence into unrelated non-broad questions", () => {
     expect(graphRank("Where does EvidenceWeave store authored notes?", goldenBlocks, goldenEntities, goldenRelations, 5)).toEqual([]);
+  });
+
+  it("refuses a temporally scoped out-of-domain question without fabricated evidence", async () => {
+    const result = await runEvidenceQuery({ question: "What was Apple revenue in 2024?", blocks: goldenBlocks, entities: goldenEntities, relations: goldenRelations, persistTrace: false });
+    expect(result.evidence).toHaveLength(0);
+    expect(result.trace.paths).toHaveLength(0);
+    const verified = verifyExtractive("What was Apple revenue in 2024?", result.evidence);
+    expect(verified.answer).toMatch(/^Evidence gap:/);
   });
 
   it("does not invent a graph path for a disconnected question", async () => {
