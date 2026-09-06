@@ -1,9 +1,9 @@
 import { bm25Rank, graphRank, reciprocalRankFusion, type EmbeddingProvider, type RankedEvidence, type UnifiedSourceBlock } from "./hybrid";
-import { buildRelationProofs, connectedComponents, relationMatchesTemporal, type QueryRoute, type RelationPathProof } from "./reasoning";
+import { buildRelationProofs, connectedComponents, relationMatchesTemporal, type QueryRoute, type RelationPathProof, type TemporalConstraint } from "./reasoning";
 import { cachedVectorRank, ensureSemanticIndex, type SemanticIndexOptions } from "./semantic";
 import { knowledgeDb, type EntityCandidateRecord, type QueryTraceRecord, type RelationCandidateRecord } from "./store";
 
-export const EVIDENCE_ENGINE_VERSION = "evidence-engine-v2";
+export const EVIDENCE_ENGINE_VERSION = "evidence-engine-v3";
 
 export interface EvidenceQueryTrace {
   id: string;
@@ -23,9 +23,11 @@ export interface EvidenceQueryTrace {
   }[];
   diagnostics: {
     blockCount: number;
+    eligibleBlockCount: number;
     acceptedEntityCount: number;
     acceptedRelationCount: number;
     semanticEnabled: boolean;
+    semanticWorkerBacked: boolean;
     missingPathPairs: string[];
   };
 }
@@ -33,6 +35,19 @@ export interface EvidenceQueryTrace {
 export interface EvidenceQueryResult {
   evidence: RankedEvidence[];
   trace: EvidenceQueryTrace;
+}
+
+function yearInConstraint(year: number, constraint: TemporalConstraint): boolean {
+  return (constraint.fromYear === undefined || year >= constraint.fromYear) && (constraint.toYear === undefined || year <= constraint.toYear);
+}
+
+export function blockMatchesTemporal(block: UnifiedSourceBlock, constraint: TemporalConstraint): boolean {
+  if ((block.mentionedYears ?? []).some((year) => yearInConstraint(year, constraint))) return true;
+  const metadataYears = [block.createdAt, block.updatedAt]
+    .filter((value): value is string => Boolean(value))
+    .map((value) => new Date(value).getUTCFullYear())
+    .filter(Number.isFinite);
+  return metadataYears.some((year) => yearInConstraint(year, constraint));
 }
 
 function temporalGraphRank(
@@ -74,21 +89,25 @@ export async function runEvidenceQuery(args: {
   limit?: number;
   persistTrace?: boolean;
   semanticProgress?: SemanticIndexOptions["onProgress"];
+  signal?: AbortSignal;
 }): Promise<EvidenceQueryResult> {
   const question = args.question.trim();
   if (!question) throw new Error("Question cannot be empty.");
+  if (args.signal?.aborted) throw new DOMException("Evidence query cancelled.", "AbortError");
   const entities = args.entities ?? [];
   const relations = args.relations ?? [];
   const limit = Math.max(1, Math.min(args.limit ?? 10, 50));
   const channelLimit = Math.max(20, limit * 3);
   const proof = buildRelationProofs(question, entities, relations, 4);
-  const bm25 = bm25Rank(question, args.blocks, channelLimit);
-  const graph = temporalGraphRank(question, args.blocks, entities, relations, proof.route, proof.paths, channelLimit);
+  const eligibleBlocks = proof.route.temporal ? args.blocks.filter((block) => blockMatchesTemporal(block, proof.route.temporal!)) : args.blocks;
+  const bm25 = bm25Rank(question, eligibleBlocks, channelLimit);
+  const graph = temporalGraphRank(question, eligibleBlocks, entities, relations, proof.route, proof.paths, channelLimit);
   let vector: { block: UnifiedSourceBlock; score: number }[] = [];
-  if (args.provider) {
-    await ensureSemanticIndex(args.blocks, args.provider, { onProgress: args.semanticProgress });
-    vector = await cachedVectorRank(question, args.blocks, args.provider, channelLimit);
+  if (args.provider && eligibleBlocks.length) {
+    await ensureSemanticIndex(args.blocks, args.provider, { onProgress: args.semanticProgress, signal: args.signal });
+    vector = await cachedVectorRank(question, eligibleBlocks, args.provider, channelLimit, args.signal);
   }
+  if (args.signal?.aborted) throw new DOMException("Evidence query cancelled.", "AbortError");
   const evidence = reciprocalRankFusion({ bm25, vector, graph }, limit);
   const expectedPairs: string[] = [];
   for (let left = 0; left < proof.route.anchorEntityIds.length; left += 1) {
@@ -106,9 +125,11 @@ export async function runEvidenceQuery(args: {
     results: evidence.map((hit) => ({ blockId: hit.block.id, sourceType: hit.block.sourceType, sourceId: hit.block.sourceId, fusedScore: hit.fusedScore, ranks: hit.ranks, scores: hit.scores })),
     diagnostics: {
       blockCount: args.blocks.length,
+      eligibleBlockCount: eligibleBlocks.length,
       acceptedEntityCount: entities.filter((entity) => entity.status === "accepted" && !entity.mergedIntoId).length,
       acceptedRelationCount: relations.filter((relation) => relation.status === "accepted").length,
       semanticEnabled: Boolean(args.provider),
+      semanticWorkerBacked: Boolean(args.provider?.workerBacked),
       missingPathPairs: expectedPairs.filter((pair) => !resolvedPairs.has(pair))
     }
   };

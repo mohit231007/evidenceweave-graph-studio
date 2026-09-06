@@ -51,7 +51,7 @@ export async function ensureSemanticIndex(blocks: UnifiedSourceBlock[], provider
   for (let offset = 0; offset < stale.length; offset += batchSize) {
     if (options.signal?.aborted) throw new DOMException("Semantic indexing cancelled.", "AbortError");
     const batch = stale.slice(offset, offset + batchSize);
-    const vectors = await provider.embed(batch.map(semanticInput));
+    const vectors = await provider.embed(batch.map(semanticInput), { signal: options.signal });
     if (vectors.length !== batch.length) throw new Error("Embedding provider returned an unexpected vector count.");
     const now = new Date().toISOString();
     const records = batch.map((block, index): EmbeddingRecord => ({
@@ -76,9 +76,9 @@ export async function ensureSemanticIndex(blocks: UnifiedSourceBlock[], provider
   return blocks.map((block) => byId.get(embeddingRecordId(provider, block.id))).filter((record): record is EmbeddingRecord => Boolean(record));
 }
 
-export async function cachedVectorRank(query: string, blocks: UnifiedSourceBlock[], provider: EmbeddingProvider, limit = 20): Promise<{ block: UnifiedSourceBlock; score: number }[]> {
+export async function cachedVectorRank(query: string, blocks: UnifiedSourceBlock[], provider: EmbeddingProvider, limit = 20, signal?: AbortSignal): Promise<{ block: UnifiedSourceBlock; score: number }[]> {
   if (!query.trim() || !blocks.length) return [];
-  const [queryVector] = await provider.embed([query]);
+  const [queryVector] = await provider.embed([query], { signal });
   const records = await knowledgeDb.embeddings.where("modelId").equals(provider.id).toArray();
   const recordByBlock = new Map(records.filter((record) => record.modelVersion === provider.version).map((record) => [record.blockId, record]));
   return blocks.flatMap((block) => {
@@ -95,15 +95,16 @@ export async function hybridRetrieveCached(
   entities: EntityCandidateRecord[],
   relations: RelationCandidateRecord[],
   provider: EmbeddingProvider | undefined,
-  limit = 10
+  limit = 10,
+  signal?: AbortSignal
 ): Promise<RankedEvidence[]> {
   const channelLimit = Math.max(20, limit * 3);
   const bm25 = bm25Rank(query, blocks, channelLimit);
   const graph = graphRank(query, blocks, entities, relations, channelLimit);
   let vector: { block: UnifiedSourceBlock; score: number }[] = [];
   if (provider) {
-    await ensureSemanticIndex(blocks, provider);
-    vector = await cachedVectorRank(query, blocks, provider, channelLimit);
+    await ensureSemanticIndex(blocks, provider, { signal });
+    vector = await cachedVectorRank(query, blocks, provider, channelLimit, signal);
   }
   return reciprocalRankFusion({ bm25, vector, graph }, limit);
 }

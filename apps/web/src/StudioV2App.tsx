@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import WorkspaceTools from "./WorkspaceTools";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
 import {
@@ -12,7 +13,8 @@ import {
   type KnowledgeGraph,
   type NoteRecord
 } from "./lib/core";
-import { formatLocation, ingestFile } from "./lib/documents";
+import { formatLocation, type DocumentImportBundle } from "./lib/documents";
+import { createDocumentImportJob, type DocumentImportJob, type DocumentImportJobSnapshot } from "./lib/document-jobs";
 import { extractEntityCandidates, extractRelationCandidates } from "./lib/entities";
 import { runEvidenceQuery, type EvidenceQueryTrace } from "./lib/engine";
 import {
@@ -32,8 +34,13 @@ import {
   reviewEntity as persistEntityReview,
   reviewRelation as persistRelationReview,
   setEntityPinned,
+  setRelationValidity,
   splitEntity
 } from "./lib/review";
+import { undoReviewAudit } from "./lib/review-undo";
+import { createLocalNerProvider, extractLocalModelEntityCandidates, type LocalNerProvider } from "./lib/local-ner";
+import { buildSemanticLinkSuggestions, reviewSemanticLink } from "./lib/semantic-links";
+import { ensureWorkspaceSchema, loadWorkspaceState, saveWorkspaceState, touchRecentNote } from "./lib/workspace-state";
 import {
   knowledgeDb,
   type CanvasRecord,
@@ -43,6 +50,7 @@ import {
   type RelationCandidateRecord,
   type ReviewAuditRecord,
   type SavedViewRecord,
+  type SemanticLinkSuggestionRecord,
   type SnapshotRecord,
   type SourceDocumentRecord,
   type TrashRecord
@@ -99,6 +107,7 @@ export default function StudioV2App() {
   const [snapshots, setSnapshots] = useState<SnapshotRecord[]>([]);
   const [reviewAudit, setReviewAudit] = useState<ReviewAuditRecord[]>([]);
   const [queryTraces, setQueryTraces] = useState<QueryTraceRecord[]>([]);
+  const [semanticSuggestions, setSemanticSuggestions] = useState<SemanticLinkSuggestionRecord[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [view, setView] = useState<MainView>("workspace");
   const [mode, setMode] = useState<NoteMode>("edit");
@@ -111,7 +120,11 @@ export default function StudioV2App() {
   const [semanticState, setSemanticState] = useState<SemanticState>("off");
   const [semanticProgress, setSemanticProgress] = useState("");
   const [llmProgress, setLlmProgress] = useState("");
+  const [importJob, setImportJob] = useState<DocumentImportJobSnapshot>();
   const semanticProvider = useRef<EmbeddingProvider | undefined>(undefined);
+  const localNerProvider = useRef<LocalNerProvider | undefined>(undefined);
+  const workspaceHydrated = useRef(false);
+  const activeImportJob = useRef<DocumentImportJob | undefined>(undefined);
 
   const refresh = async (preferId?: string) => {
     const [
@@ -125,7 +138,8 @@ export default function StudioV2App() {
       nextTrash,
       nextSnapshots,
       nextAudit,
-      nextTraces
+      nextTraces,
+      nextSemanticSuggestions
     ] = await Promise.all([
       db.notes.orderBy("updatedAt").reverse().toArray(),
       knowledgeDb.documents.orderBy("importedAt").reverse().toArray(),
@@ -137,7 +151,8 @@ export default function StudioV2App() {
       knowledgeDb.trash.orderBy("deletedAt").reverse().toArray(),
       knowledgeDb.snapshots.orderBy("createdAt").reverse().toArray(),
       knowledgeDb.reviewAudit.orderBy("createdAt").reverse().toArray(),
-      knowledgeDb.queryTraces.orderBy("createdAt").reverse().toArray()
+      knowledgeDb.queryTraces.orderBy("createdAt").reverse().toArray(),
+      knowledgeDb.semanticSuggestions.orderBy("updatedAt").reverse().toArray()
     ]);
     setNotes(nextNotes);
     setDocuments(nextDocuments);
@@ -150,6 +165,7 @@ export default function StudioV2App() {
     setSnapshots(nextSnapshots);
     setReviewAudit(nextAudit);
     setQueryTraces(nextTraces);
+    setSemanticSuggestions(nextSemanticSuggestions);
     setSelectedId((current) => {
       if (preferId && nextNotes.some((note) => note.id === preferId)) return preferId;
       if (current && nextNotes.some((note) => note.id === current)) return current;
@@ -158,7 +174,24 @@ export default function StudioV2App() {
   };
 
   useEffect(() => {
-    void seedIfEmpty().then(() => refresh());
+    void seedIfEmpty().then(async () => {
+      await ensureWorkspaceSchema(await db.notes.toArray());
+      const saved = await loadWorkspaceState();
+      await refresh(saved.activeNoteId);
+      const validViews: MainView[] = ["workspace", "documents", "graph", "review", "evidence", "canvas", "library"];
+      if (validViews.includes(saved.activeView as MainView)) setView(saved.activeView as MainView);
+      workspaceHydrated.current = true;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!workspaceHydrated.current) return;
+    void saveWorkspaceState({ activeView: view, activeNoteId: selectedId || undefined });
+  }, [view, selectedId]);
+
+  useEffect(() => () => {
+    semanticProvider.current?.dispose?.();
+    localNerProvider.current?.dispose?.();
   }, []);
 
   const selected = notes.find((note) => note.id === selectedId);
@@ -183,6 +216,8 @@ export default function StudioV2App() {
       updatedAt: now
     };
     await db.notes.add(note);
+    const workspaceState = touchRecentNote(await loadWorkspaceState(), id);
+    await knowledgeDb.workspaceState.put({ ...workspaceState, activeView: "workspace" });
     await refresh(id);
     setView("workspace");
     setMode("edit");
@@ -194,6 +229,8 @@ export default function StudioV2App() {
     if (existing) {
       setSelectedId(existing.id);
       setView("workspace");
+      const workspaceState = touchRecentNote(await loadWorkspaceState(), existing.id);
+      await knowledgeDb.workspaceState.put({ ...workspaceState, activeView: "workspace" });
       return;
     }
     const body = expandTemplate(
@@ -262,31 +299,68 @@ export default function StudioV2App() {
     setStatus(`Restored ${restored.length} notes from local snapshot.`);
   };
 
+  const commitImportedBundle = async (bundle: DocumentImportBundle): Promise<"imported" | "duplicate"> => {
+    const duplicate = await knowledgeDb.documents.where("sha256").equals(bundle.document.sha256).first();
+    if (duplicate) return "duplicate";
+    await knowledgeDb.transaction("rw", [knowledgeDb.documents, knowledgeDb.blocks], async () => {
+      await knowledgeDb.documents.put(bundle.document);
+      await knowledgeDb.blocks.bulkPut(bundle.blocks);
+    });
+    return "imported";
+  };
+
   const importKnowledge = async (fileList: FileList | null) => {
     if (!fileList) return;
     let imported = 0;
     let duplicates = 0;
+    let cancelled = 0;
     const failures: string[] = [];
     for (const file of Array.from(fileList)) {
+      const job = createDocumentImportJob(file);
+      activeImportJob.current = job;
+      const unsubscribe = job.subscribe(setImportJob);
       try {
-        const bundle = await ingestFile(file);
-        const duplicate = await knowledgeDb.documents.where("sha256").equals(bundle.document.sha256).first();
-        if (duplicate) {
-          duplicates += 1;
-          continue;
-        }
-        await knowledgeDb.transaction("rw", [knowledgeDb.documents, knowledgeDb.blocks], async () => {
-          await knowledgeDb.documents.put(bundle.document);
-          await knowledgeDb.blocks.bulkPut(bundle.blocks);
-        });
-        imported += 1;
+        const bundle = await job.start();
+        const outcome = await commitImportedBundle(bundle);
+        if (outcome === "duplicate") duplicates += 1;
+        else imported += 1;
       } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          cancelled += 1;
+          break;
+        }
         failures.push(`${file.name}: ${error instanceof Error ? error.message : "failed"}`);
+      } finally {
+        unsubscribe();
       }
     }
     await refresh();
     setView("documents");
-    setStatus(`Imported ${imported} document${imported === 1 ? "" : "s"}; ${duplicates} duplicate${duplicates === 1 ? "" : "s"} skipped${failures.length ? `; ${failures.length} failed` : ""}.`);
+    setStatus(`Imported ${imported} document${imported === 1 ? "" : "s"}; ${duplicates} duplicate${duplicates === 1 ? "" : "s"} skipped${cancelled ? `; ${cancelled} cancelled and resumable` : ""}${failures.length ? `; ${failures.length} failed` : ""}.`);
+  };
+
+  const cancelImport = () => {
+    activeImportJob.current?.cancel();
+    setImportJob(activeImportJob.current?.snapshot);
+    setStatus("Cancelled document extraction before database commit. Resume restarts safely from the retained local File object.");
+  };
+
+  const resumeImport = async () => {
+    const job = activeImportJob.current;
+    if (!job || !["cancelled", "failed"].includes(job.snapshot.status)) return;
+    const unsubscribe = job.subscribe(setImportJob);
+    try {
+      const bundle = await job.resume();
+      const outcome = await commitImportedBundle(bundle);
+      await refresh();
+      setView("documents");
+      setStatus(outcome === "duplicate" ? `Resumed ${bundle.document.name}; duplicate skipped.` : `Resumed and imported ${bundle.document.name} without partial prior state.`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Resumed import failed.");
+    } finally {
+      unsubscribe();
+      setImportJob(job.snapshot);
+    }
   };
 
   const rebuildCandidates = async () => {
@@ -305,6 +379,53 @@ export default function StudioV2App() {
     setStatus(`Generated ${freshEntities.length} entity and ${freshRelations.length} relationship candidates. Previous decisions are kept only when extractor versions still match.`);
   };
 
+  const runLocalNer = async () => {
+    try {
+      setStatus("Loading optional local NER model. First use downloads model files; all inference stays in this browser.");
+      localNerProvider.current ??= await createLocalNerProvider();
+      const provider = localNerProvider.current;
+      const previousByKey = new Map(entities.map((entity) => [`${entity.entityType}:${entity.normalizedName}`, entity]));
+      const modelCandidates = await extractLocalModelEntityCandidates(sources, provider, {
+        onProgress: (completed, total) => setStatus(`Local NER ${completed}/${total} source blocks…`)
+      });
+      const candidates = modelCandidates.flatMap((candidate) => {
+        const key = `${candidate.entityType}:${candidate.normalizedName}`;
+        const previous = previousByKey.get(key);
+        if (previous && !previous.extractorVersion.startsWith("local-ner:")) return [];
+        return [reconcileEntityReview(previous, candidate)];
+      });
+      if (candidates.length) await knowledgeDb.entities.bulkPut(candidates);
+      await refresh();
+      setView("review");
+      setStatus(`Optional local NER proposed ${candidates.length} additional pending candidate${candidates.length === 1 ? "" : "s"}; deterministic candidates remain authoritative until review.`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Local NER failed.");
+    }
+  };
+
+  const buildSemanticSuggestions = async () => {
+    try {
+      if (!semanticProvider.current) {
+        setSemanticState("loading");
+        setStatus("Loading the pinned local embedding model before semantic-link analysis…");
+        semanticProvider.current = await createTransformersProvider();
+        setSemanticState("ready");
+      }
+      const suggestions = await buildSemanticLinkSuggestions(entities, semanticProvider.current);
+      await refresh();
+      setView("review");
+      setStatus(`Generated ${suggestions.length} separate semantic-link suggestion${suggestions.length === 1 ? "" : "s"}. No authored or inferred graph edge was mutated.`);
+    } catch (error) {
+      setSemanticState("failed");
+      setStatus(error instanceof Error ? error.message : "Semantic-link analysis failed.");
+    }
+  };
+
+  const reviewSemanticSuggestion = async (id: string, accepted: boolean) => {
+    await reviewSemanticLink(id, accepted ? "accepted" : "rejected");
+    await refresh();
+  };
+
   const reviewEntity = async (entity: EntityCandidateRecord, accepted: boolean) => {
     await persistEntityReview(entity, accepted ? "accepted" : "rejected");
     await refresh();
@@ -313,6 +434,32 @@ export default function StudioV2App() {
   const reviewRelation = async (relation: RelationCandidateRecord, accepted: boolean) => {
     await persistRelationReview(relation, accepted ? "accepted" : "rejected");
     await refresh();
+  };
+
+  const reopenReviewedEntity = async (entity: EntityCandidateRecord) => {
+    await persistEntityReview(entity, "pending");
+    await refresh();
+    setStatus(`Reopened “${entity.canonicalName}” for review.`);
+  };
+
+  const reopenReviewedRelation = async (relation: RelationCandidateRecord) => {
+    await persistRelationReview(relation, "pending");
+    await refresh();
+    setStatus(`Reopened relationship “${relation.relation}” for review.`);
+  };
+
+  const editRelationValidity = async (relation: RelationCandidateRecord) => {
+    const validFrom = prompt("Relationship valid from (ISO date, blank for unknown)", relation.validFrom ?? "");
+    if (validFrom === null) return;
+    const validTo = prompt("Relationship valid to (ISO date, blank for open-ended/unknown)", relation.validTo ?? "");
+    if (validTo === null) return;
+    try {
+      await setRelationValidity(relation, validFrom, validTo);
+      await refresh();
+      setStatus("Updated reviewed relationship validity with an auditable before/after snapshot.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Relationship validity update failed.");
+    }
   };
 
   const renameReviewedEntity = async (entity: EntityCandidateRecord) => {
@@ -350,6 +497,16 @@ export default function StudioV2App() {
     await splitEntity(entity, desired, [entity.evidenceBlockIds[0]]);
     await refresh();
     setStatus(`Split one evidence observation from “${entity.canonicalName}” into pending entity “${desired}”.`);
+  };
+
+  const undoAuditAction = async (auditId: string) => {
+    try {
+      await undoReviewAudit(auditId);
+      await refresh();
+      setStatus("Reversed the selected review mutation from its audited before-snapshot.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Audit undo failed.");
+    }
   };
 
   const enableSemantic = async () => {
@@ -418,7 +575,7 @@ export default function StudioV2App() {
 
   const exportAll = async () => {
     const bundle = await exportPortableWorkspace(notes);
-    download(`evidenceweave-v2-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(bundle, null, 2));
+    download(`evidenceweave-v3-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(bundle, null, 2));
   };
 
   const restoreAll = async (file?: File) => {
@@ -427,7 +584,7 @@ export default function StudioV2App() {
       const bundle = validatePortableWorkspace(JSON.parse(await file.text()));
       await restorePortableWorkspace(bundle);
       await refresh(bundle.notes[0]?.id);
-      setStatus(`Restored portable v2 workspace: ${bundle.notes.length} notes, ${bundle.documents.length} documents, ${bundle.reviewAudit.length} audit events and ${bundle.queryTraces.length} query traces. Semantic vectors will rebuild locally as needed.`);
+      setStatus(`Restored portable v3 workspace: ${bundle.notes.length} notes, ${bundle.documents.length} documents, ${bundle.reviewAudit.length} audit events and ${bundle.queryTraces.length} query traces. Semantic vectors will rebuild locally as needed.`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Restore failed.");
     }
@@ -437,16 +594,24 @@ export default function StudioV2App() {
     if (!notes.some((note) => note.id === id)) return;
     setSelectedId(id);
     setView("workspace");
+    void loadWorkspaceState().then((current) => knowledgeDb.workspaceState.put(touchRecentNote(current, id)));
+  };
+
+  const switchView = async (nextView: MainView) => {
+    if (workspaceHydrated.current) {
+      await saveWorkspaceState({ activeView: nextView, activeNoteId: selectedId || undefined });
+    }
+    setView(nextView);
   };
 
   return (
     <div className="app-shell v1-shell v2-shell">
       <header className="topbar">
         <div className="brand-mark">EW</div>
-        <div className="brand-copy"><strong>EvidenceWeave</strong><span>Graph Studio v1.0</span></div>
+        <div className="brand-copy"><strong>EvidenceWeave</strong><span>Graph Studio v1.1</span></div>
         <nav className="view-tabs" aria-label="Primary views">
           {(["workspace", "documents", "graph", "review", "evidence", "canvas", "library"] as MainView[]).map((item) => (
-            <button key={item} className={view === item ? "active" : ""} onClick={() => setView(item)}>
+            <button key={item} className={view === item ? "active" : ""} onClick={() => void switchView(item)}>
               {item[0].toUpperCase() + item.slice(1)}
             </button>
           ))}
@@ -469,21 +634,22 @@ export default function StudioV2App() {
             </button>
           ))}
         </div>
+        <WorkspaceTools notes={notes} createNote={createNote} openNote={openNote} onChanged={refresh} />
         <div className="sidebar-footer">
           <label className="file-action">Import knowledge<input hidden type="file" multiple accept=".md,.txt,.csv,.html,.htm,.pdf,.docx,text/*,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={(event) => void importKnowledge(event.target.files)} /></label>
           <button className="file-action" onClick={() => void snapshot()}>Create snapshot</button>
-          <button className="file-action" onClick={() => void exportAll()}>Export portable v2</button>
-          <label className="file-action">Restore portable v1/v2<input hidden type="file" accept=".json,application/json" onChange={(event) => void restoreAll(event.target.files?.[0])} /></label>
+          <button className="file-action" onClick={() => void exportAll()}>Export portable v3</button>
+          <label className="file-action">Restore portable v1/v2/v3<input hidden type="file" accept=".json,application/json" onChange={(event) => void restoreAll(event.target.files?.[0])} /></label>
         </div>
       </aside>
 
       <main className="main-pane">
         {view === "workspace" && <WorkspaceView note={selected} notes={notes} graph={authoredGraph} mode={mode} setMode={setMode} save={saveSelected} rename={renameSelected} remove={trashSelected} openNote={openNote} />}
-        {view === "documents" && <DocumentsView documents={documents} blocks={blocks} importKnowledge={importKnowledge} />}
+        {view === "documents" && <DocumentsView documents={documents} blocks={blocks} importKnowledge={importKnowledge} importJob={importJob} cancelImport={cancelImport} resumeImport={resumeImport} />}
         {view === "graph" && <GraphStudio graph={authoredGraph} entities={entities} relations={relations} onOpen={openNote} />}
-        {view === "review" && <ReviewView entities={entities} relations={relations} blocks={sources} audit={reviewAudit} rebuild={rebuildCandidates} reviewEntity={reviewEntity} reviewRelation={reviewRelation} renameEntity={renameReviewedEntity} togglePin={togglePin} mergeEntity={mergeReviewedEntity} splitEntity={splitReviewedEntity} />}
+        {view === "review" && <ReviewView entities={entities} relations={relations} blocks={sources} audit={reviewAudit} rebuild={rebuildCandidates} reviewEntity={reviewEntity} reviewRelation={reviewRelation} reopenEntity={reopenReviewedEntity} reopenRelation={reopenReviewedRelation} editRelationValidity={editRelationValidity} renameEntity={renameReviewedEntity} togglePin={togglePin} mergeEntity={mergeReviewedEntity} splitEntity={splitReviewedEntity} undoAudit={undoAuditAction} runLocalNer={runLocalNer} buildSemanticSuggestions={buildSemanticSuggestions} semanticSuggestions={semanticSuggestions} reviewSemanticSuggestion={reviewSemanticSuggestion} />}
         {view === "evidence" && <EvidenceStudio question={question} setQuestion={setQuestion} evidence={evidence} trace={trace} verified={verified} entities={entities} sources={sources} semanticState={semanticState} semanticProgress={semanticProgress} enableSemantic={enableSemantic} runEvidence={runEvidence} runLocalLlm={runLocalLlm} llmProgress={llmProgress} />}
-        {view === "canvas" && <CanvasStudio canvases={canvases} notes={notes} selected={selected} refresh={refresh} />}
+        {view === "canvas" && <CanvasStudio canvases={canvases} notes={notes} documents={documents} selected={selected} refresh={refresh} />}
         {view === "library" && <LibraryStudio notes={notes} graph={authoredGraph} documents={documents} entities={entities} relations={relations} views={views} trash={trash} snapshots={snapshots} queryTraces={queryTraces} reviewAudit={reviewAudit} restoreTrash={restoreTrash} restoreSnapshot={restoreSnapshot} openNote={openNote} refresh={refresh} />}
       </main>
 
@@ -534,10 +700,13 @@ function WorkspaceView({ note, notes, graph, mode, setMode, save, rename, remove
   );
 }
 
-function DocumentsView({ documents, blocks, importKnowledge }: {
+function DocumentsView({ documents, blocks, importKnowledge, importJob, cancelImport, resumeImport }: {
   documents: SourceDocumentRecord[];
   blocks: DocumentBlockRecord[];
   importKnowledge: (files: FileList | null) => Promise<void>;
+  importJob?: DocumentImportJobSnapshot;
+  cancelImport: () => void;
+  resumeImport: () => Promise<void>;
 }) {
   return (
     <div className="single-view">
@@ -545,6 +714,7 @@ function DocumentsView({ documents, blocks, importKnowledge }: {
       <h1>Every extracted block keeps its source.</h1>
       <p className="lede">PDF pages, CSV rows, DOCX/HTML sections and text offsets are stored locally with content hashes and extractor versions.</p>
       <label className="primary import-hero">Import PDF / DOCX / CSV / HTML / text<input hidden type="file" multiple accept=".md,.txt,.csv,.html,.htm,.pdf,.docx" onChange={(event) => void importKnowledge(event.target.files)} /></label>
+      {importJob && <div className="import-job panel" aria-live="polite"><strong>{importJob.fileName}</strong><span>{importJob.status}{importJob.progress ? ` · ${importJob.progress.phase} ${importJob.progress.completed}/${importJob.progress.total}` : ""}</span>{importJob.progress?.detail && <small>{importJob.progress.detail}</small>}<div className="review-actions">{importJob.status === "running" && <button onClick={cancelImport}>Cancel import</button>}{(importJob.status === "cancelled" || importJob.status === "failed") && <button onClick={() => void resumeImport()}>Resume import</button>}</div></div>}
       <div className="document-grid">
         {documents.map((document) => {
           const sourceBlocks = blocks.filter((block) => block.documentId === document.id);
@@ -622,7 +792,7 @@ function GraphStudio({ graph, entities, relations, onOpen }: {
   );
 }
 
-function ReviewView({ entities, relations, blocks, audit, rebuild, reviewEntity, reviewRelation, renameEntity: renameEntityAction, togglePin, mergeEntity, splitEntity: splitEntityAction }: {
+function ReviewView({ entities, relations, blocks, audit, rebuild, reviewEntity, reviewRelation, reopenEntity, reopenRelation, editRelationValidity, renameEntity: renameEntityAction, togglePin, mergeEntity, splitEntity: splitEntityAction, undoAudit, runLocalNer, buildSemanticSuggestions, semanticSuggestions, reviewSemanticSuggestion }: {
   entities: EntityCandidateRecord[];
   relations: RelationCandidateRecord[];
   blocks: UnifiedSourceBlock[];
@@ -630,10 +800,18 @@ function ReviewView({ entities, relations, blocks, audit, rebuild, reviewEntity,
   rebuild: () => Promise<void>;
   reviewEntity: (entity: EntityCandidateRecord, accepted: boolean) => Promise<void>;
   reviewRelation: (relation: RelationCandidateRecord, accepted: boolean) => Promise<void>;
+  reopenEntity: (entity: EntityCandidateRecord) => Promise<void>;
+  reopenRelation: (relation: RelationCandidateRecord) => Promise<void>;
+  editRelationValidity: (relation: RelationCandidateRecord) => Promise<void>;
   renameEntity: (entity: EntityCandidateRecord) => Promise<void>;
   togglePin: (entity: EntityCandidateRecord) => Promise<void>;
   mergeEntity: (entity: EntityCandidateRecord) => Promise<void>;
   splitEntity: (entity: EntityCandidateRecord) => Promise<void>;
+  undoAudit: (id: string) => Promise<void>;
+  runLocalNer: () => Promise<void>;
+  buildSemanticSuggestions: () => Promise<void>;
+  semanticSuggestions: SemanticLinkSuggestionRecord[];
+  reviewSemanticSuggestion: (id: string, accepted: boolean) => Promise<void>;
 }) {
   const [scope, setScope] = useState<"pending" | "reviewed">("pending");
   const visibleEntities = entities.filter((item) => !item.mergedIntoId && (scope === "pending" ? item.status === "pending" : item.status !== "pending"));
@@ -644,7 +822,7 @@ function ReviewView({ entities, relations, blocks, audit, rebuild, reviewEntity,
     <div className="single-view">
       <div className="hero-row">
         <div><span className="eyebrow">Human review queue</span><h1>Inference proposes. You decide.</h1><p>Every decision is auditable. Extractor-version changes reopen stale decisions rather than silently inheriting trust.</p></div>
-        <button className="primary" onClick={() => void rebuild()}>Rebuild candidates</button>
+        <div className="review-actions wrap-actions"><button className="primary" onClick={() => void rebuild()}>Rebuild deterministic</button><button onClick={() => void runLocalNer()}>Optional local NER</button><button onClick={() => void buildSemanticSuggestions()}>Suggest semantic links</button></div>
       </div>
       <div className="segmented compact-segmented"><button className={scope === "pending" ? "active" : ""} onClick={() => setScope("pending")}>Pending</button><button className={scope === "reviewed" ? "active" : ""} onClick={() => setScope("reviewed")}>Reviewed</button></div>
       <div className="review-columns">
@@ -655,7 +833,7 @@ function ReviewView({ entities, relations, blocks, audit, rebuild, reviewEntity,
               <div className="review-title"><strong>{entity.pinned ? "★ " : ""}{entity.canonicalName}</strong><small>{entity.entityType} · {Math.round(entity.confidence * 100)}% · {entity.status}</small></div>
               <p>{entity.evidenceBlockIds.slice(0, 3).map((id) => blockMap.get(id)?.title).filter(Boolean).join(" · ")}</p>
               <div className="review-actions wrap-actions">
-                {entity.status === "pending" && <><button onClick={() => void reviewEntity(entity, true)}>Accept</button><button onClick={() => void reviewEntity(entity, false)}>Reject</button></>}
+                {entity.status === "pending" ? <><button onClick={() => void reviewEntity(entity, true)}>Accept</button><button onClick={() => void reviewEntity(entity, false)}>Reject</button></> : <button onClick={() => void reopenEntity(entity)}>Reopen</button>}
                 <button onClick={() => void renameEntityAction(entity)}>Rename</button>
                 <button onClick={() => void togglePin(entity)}>{entity.pinned ? "Unpin" : "Pin"}</button>
                 <button onClick={() => void mergeEntity(entity)}>Merge</button>
@@ -669,12 +847,14 @@ function ReviewView({ entities, relations, blocks, audit, rebuild, reviewEntity,
           {visibleRelations.slice(0, 100).map((relation) => (
             <article className="review-card" key={relation.id}>
               <div><strong>{entityMap.get(relation.sourceEntityId)?.canonicalName ?? relation.sourceEntityId}</strong><small> {relation.relation} → </small><strong>{entityMap.get(relation.targetEntityId)?.canonicalName ?? relation.targetEntityId}</strong></div>
-              <p>{relation.evidenceBlockIds.map((id) => blockMap.get(id)?.title).filter(Boolean).slice(0, 3).join(" · ")} · {Math.round(relation.confidence * 100)}% · {relation.status}</p>
-              {relation.status === "pending" && <div className="review-actions"><button onClick={() => void reviewRelation(relation, true)}>Accept</button><button onClick={() => void reviewRelation(relation, false)}>Reject</button></div>}
+              <p>{relation.evidenceBlockIds.map((id) => blockMap.get(id)?.title).filter(Boolean).slice(0, 3).join(" · ")} · {Math.round(relation.confidence * 100)}% · {relation.status}{relation.validFrom || relation.validTo ? ` · validity ${relation.validFrom ?? "…"} → ${relation.validTo ?? "…"}` : ""}</p>
+              <div className="review-actions wrap-actions">{relation.status === "pending" ? <><button onClick={() => void reviewRelation(relation, true)}>Accept</button><button onClick={() => void reviewRelation(relation, false)}>Reject</button></> : <button onClick={() => void reopenRelation(relation)}>Reopen</button>}<button onClick={() => void editRelationValidity(relation)}>Edit validity</button></div>
             </article>
           ))}
+          <h2>Semantic suggestions <span>{semanticSuggestions.length}</span></h2>
+          {semanticSuggestions.slice(0, 30).map((suggestion) => <article className="review-card" key={suggestion.id}><div><strong>{entityMap.get(suggestion.sourceEntityId)?.canonicalName ?? suggestion.sourceEntityId}</strong><small> ⇄ semantic · {Math.round(suggestion.score * 100)}% ⇄ </small><strong>{entityMap.get(suggestion.targetEntityId)?.canonicalName ?? suggestion.targetEntityId}</strong></div><p>{suggestion.status} · {suggestion.modelId}</p>{suggestion.status === "pending" && <div className="review-actions"><button onClick={() => void reviewSemanticSuggestion(suggestion.id, true)}>Accept suggestion</button><button onClick={() => void reviewSemanticSuggestion(suggestion.id, false)}>Reject suggestion</button></div>}</article>)}
           <h2>Recent audit <span>{audit.length}</span></h2>
-          <div className="audit-list">{audit.slice(0, 20).map((item) => <div className="audit-row" key={item.id}><strong>{item.action}</strong><span>{item.targetKind} · {item.targetId.slice(0, 28)}</span><time>{new Date(item.createdAt).toLocaleString()}</time></div>)}</div>
+          <div className="audit-list">{audit.slice(0, 20).map((item) => <div className="audit-row" key={item.id}><strong>{item.action}</strong><span>{item.targetKind} · {item.targetId.slice(0, 28)}</span><time>{new Date(item.createdAt).toLocaleString()}</time>{item.action !== "undo" && item.beforeJson && <button onClick={() => void undoAudit(item.id)}>Undo</button>}</div>)}</div>
         </section>
       </div>
     </div>
@@ -719,7 +899,7 @@ function EvidenceStudio({ question, setQuestion, evidence, trace, verified, enti
           {trace.paths.map((path, index) => (
             <div className="path-proof" key={`${path.sourceEntityId}-${path.targetEntityId}-${index}`}>
               <strong>{entityMap.get(path.sourceEntityId)?.canonicalName ?? path.sourceEntityId} ⇄ {entityMap.get(path.targetEntityId)?.canonicalName ?? path.targetEntityId}</strong>
-              {path.hops.map((hop) => <div className="path-hop" key={hop.relationId}><span>{entityMap.get(hop.fromEntityId)?.canonicalName ?? hop.fromEntityId}</span><b> —{hop.relation}→ </b><span>{entityMap.get(hop.toEntityId)?.canonicalName ?? hop.toEntityId}</span><small>{hop.evidenceBlockIds.map((id) => blockMap.get(id)?.title ?? id).join(" · ")}</small></div>)}
+              {path.hops.map((hop) => <div className="path-hop" key={hop.relationId}><span>{entityMap.get(hop.fromEntityId)?.canonicalName ?? hop.fromEntityId}</span><b> —{hop.relation}→ </b><span>{entityMap.get(hop.toEntityId)?.canonicalName ?? hop.toEntityId}</span><small>accepted inferred · {hop.evidenceBlockIds.map((id) => blockMap.get(id)?.title ?? id).join(" · ")}</small></div>)}
             </div>
           ))}
           {trace.diagnostics.missingPathPairs.length > 0 && <div className="claim-warning">Missing reviewed graph paths: {trace.diagnostics.missingPathPairs.join(", ")}. EvidenceWeave does not invent the missing hops.</div>}
@@ -746,9 +926,10 @@ function EvidenceStudio({ question, setQuestion, evidence, trace, verified, enti
   );
 }
 
-function CanvasStudio({ canvases, notes, selected, refresh }: {
+function CanvasStudio({ canvases, notes, documents, selected, refresh }: {
   canvases: CanvasRecord[];
   notes: NoteRecord[];
+  documents: SourceDocumentRecord[];
   selected?: NoteRecord;
   refresh: () => Promise<void>;
 }) {
@@ -775,6 +956,20 @@ function CanvasStudio({ canvases, notes, selected, refresh }: {
       setActiveId(current.id);
     }
     const next = addCanvasNode(current, { kind: "note", refId: selected.id, label: selected.title, x: 80 + current.nodes.length * 35, y: 70 + current.nodes.length * 25, width: 190, height: 90 });
+    await knowledgeDb.canvases.put(next);
+    await refresh();
+  };
+
+  const addLatestDocument = async () => {
+    const document = documents[0];
+    if (!document) return;
+    let current = canvas;
+    if (!current) {
+      current = createCanvas();
+      await knowledgeDb.canvases.put(current);
+      setActiveId(current.id);
+    }
+    const next = addCanvasNode(current, { kind: "document", refId: document.id, label: document.name, x: 110 + current.nodes.length * 35, y: 100 + current.nodes.length * 25, width: 210, height: 90 });
     await knowledgeDb.canvases.put(next);
     await refresh();
   };
@@ -842,7 +1037,7 @@ function CanvasStudio({ canvases, notes, selected, refresh }: {
     <div className="single-view canvas-view">
       <div className="hero-row">
         <div><span className="eyebrow">Open local canvas</span><h1>Arrange knowledge spatially.</h1><p>Canvas metadata is local/exportable and never replaces the underlying Markdown.</p></div>
-        <div className="canvas-actions"><button onClick={() => void ensureCanvas()}>New canvas</button><button className="primary" onClick={() => void addSelected()} disabled={!selected}>Add current note</button><button onClick={() => void addLabel()} disabled={!canvas}>Add label</button><button onClick={() => void connectLastTwo()} disabled={!canvas}>Connect last two</button><button onClick={() => void groupAll()} disabled={!canvas}>Group</button><button onClick={() => void resizeLast()} disabled={!canvas}>Resize last</button><button onClick={() => void removeLast()} disabled={!canvas}>Remove last</button><button onClick={exportActive} disabled={!canvas}>Export</button><label className="canvas-file">Import<input hidden type="file" accept=".json,application/json" onChange={(event) => void importOne(event.target.files?.[0])} /></label></div>
+        <div className="canvas-actions"><button onClick={() => void ensureCanvas()}>New canvas</button><button className="primary" onClick={() => void addSelected()} disabled={!selected}>Add current note</button><button onClick={() => void addLatestDocument()} disabled={!documents.length}>Add latest document</button><button onClick={() => void addLabel()} disabled={!canvas}>Add label</button><button onClick={() => void connectLastTwo()} disabled={!canvas}>Connect last two</button><button onClick={() => void groupAll()} disabled={!canvas}>Group</button><button onClick={() => void resizeLast()} disabled={!canvas}>Resize last</button><button onClick={() => void removeLast()} disabled={!canvas}>Remove last</button><button onClick={exportActive} disabled={!canvas}>Export</button><label className="canvas-file">Import<input hidden type="file" accept=".json,application/json" onChange={(event) => void importOne(event.target.files?.[0])} /></label></div>
       </div>
       <div className="canvas-tabs">{canvases.map((item) => <button className={item.id === activeId ? "active" : ""} key={item.id} onClick={() => setActiveId(item.id)}>{item.title}</button>)}</div>
       <div className="infinite-canvas">
@@ -859,7 +1054,7 @@ function CanvasStudio({ canvases, notes, selected, refresh }: {
               void move(node.id, Math.max(0, event.clientX - parent.left - node.width / 2), Math.max(0, event.clientY - parent.top - 20));
             }}
           >
-            <strong>{node.label}</strong><small>{node.kind}{node.refId && notes.some((note) => note.id === node.refId) ? " · linked" : ""}{node.groupId ? " · grouped" : ""}</small>
+            <strong>{node.label}</strong><small>{node.kind}{node.refId && (notes.some((note) => note.id === node.refId) || documents.some((document) => document.id === node.refId)) ? " · linked" : ""}{node.groupId ? " · grouped" : ""}</small>
           </article>
         ))}
       </div>

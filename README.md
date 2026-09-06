@@ -4,7 +4,7 @@
 
 EvidenceWeave Graph Studio is a local-first knowledge workspace and provenance-first GraphRAG application that runs in the browser. Markdown stays user-owned and authoritative; imported documents, inferred entities, embeddings, graph paths, retrieval traces, and generated answers remain derived layers that can be inspected, reviewed, exported, rebuilt, or rejected.
 
-> **Current status — v1 release candidate:** the browser product now includes local Markdown authoring, document ingestion with source provenance, authored and reviewed-inferred graph layers, human review/audit, BM25 + optional local vector + reviewed graph retrieval fused with Reciprocal Rank Fusion, explicit exact/local/multi-hop/global/temporal routing, sourced relationship-path proof, query traces, evidence-first answer verification, optional local WebLLM generation, Canvas, saved views, daily notes, trash/snapshots, portable workspace v2, PWA support, unit/evaluation/scale tests, Chromium end-to-end tests, and a zero-cost GitHub Pages deployment workflow.
+> **Current status — v1.1 completion release candidate:** the browser product now includes local Markdown authoring, document ingestion with source provenance, authored and reviewed-inferred graph layers, human review/audit, BM25 + optional local vector + reviewed graph retrieval fused with Reciprocal Rank Fusion, explicit exact/local/multi-hop/global/temporal routing, sourced relationship-path proof, query traces, evidence-first answer verification, optional local WebLLM generation, Canvas, saved views, daily notes, trash/snapshots, portable workspace v3, calendar/user-template/recent-note state, worker-safe imports, reversible review, PWA support, unit/evaluation/scale tests, Chromium end-to-end tests, and a zero-cost GitHub Pages deployment workflow.
 
 ## Product principles
 
@@ -15,7 +15,7 @@ EvidenceWeave Graph Studio is a local-first knowledge workspace and provenance-f
 - **Evidence before generation.** Retrieval and proof work without an LLM. Optional local generation is downstream of evidence and is post-validated.
 - **Provenance is first-class.** Imported blocks retain document identity plus page, row, section, or source-offset information where the source format supports it.
 - **Visible gaps.** Missing evidence, unresolved links, missing reviewed paths, malformed imports, and unsupported generated claims are surfaced instead of invented away.
-- **Portable by design.** Workspace v2 exports notes, documents, blocks, reviewed knowledge, Canvas data, saved views, recovery data, audit history, and query traces. Embeddings are deliberately rebuilt on-device instead of being treated as canonical data.
+- **Portable by design.** Workspace v3 exports notes, documents, blocks, reviewed knowledge, Canvas data, saved views, templates, workspace layout/recent state, migration records, semantic-link suggestions, recovery data, audit history, and query traces. Embeddings are deliberately rebuilt on-device instead of being treated as canonical data.
 - **Clean-room implementation.** EvidenceWeave is inspired by general local-knowledge/workspace patterns; it is not an Obsidian derivative and does not copy Obsidian source, assets, branding, CSS, proprietary APIs, or trade dress.
 
 ## What works now
@@ -26,27 +26,28 @@ EvidenceWeave Graph Studio is a local-first knowledge workspace and provenance-f
 | Safe rename | ✅ Inbound wiki links rewritten transactionally |
 | Wiki links / aliases / heading targets | ✅ |
 | Tags, typed frontmatter, backlinks | ✅ |
-| Daily notes + templates | ✅ |
+| Daily notes + templates | ✅ Calendar navigation, built-in/user templates, persisted open/recent note state |
 | Search/filter | ✅ Local note filtering |
 | Markdown preview | ✅ Sanitized before DOM insertion |
 | Markdown / TXT import | ✅ |
 | CSV import | ✅ Row-level provenance |
-| PDF import | ✅ Page-level text provenance |
+| PDF import | ✅ Page-level text plus extracted source-region bounds where PDF text geometry is available |
 | DOCX import | ✅ Browser-side extraction with section/block provenance |
 | HTML import | ✅ Sanitized text extraction |
 | Import deduplication | ✅ SHA-256 document hashing |
 | Source-block identity | ✅ Deterministic IDs/content hashes and source coordinates |
 | Authored graph | ✅ Cytoscape layer, unresolved authored targets remain visible |
-| Entity candidates | ✅ Deterministic candidates, pending by default |
+| Entity candidates | ✅ Deterministic baseline plus opt-in pinned local NER; all model proposals remain pending |
 | Relationship candidates | ✅ Source-bearing candidates, pending by default |
-| Human review | ✅ Accept/reject plus audit history |
+| Human review | ✅ Accept/reject plus reversible audit history |
 | Entity operations | ✅ Rename, aliases, pin, merge, split |
+| Semantic-link suggestions | ✅ Separate opt-in embedding-derived layer with accept/reject state; never silently becomes an authored edge |
 | Reviewed graph | ✅ Separate inferred layer; rejected/merged entities excluded |
 | Graph communities | ✅ Deterministic connected components over reviewed graph |
-| BM25 | ✅ Proper local BM25 channel |
-| Local semantic retrieval | ✅ Optional Transformers.js embeddings |
+| BM25 | ✅ Reusable inverted index plus versioned/cancellable rebuild path |
+| Local semantic retrieval | ✅ Optional pinned Transformers.js model, dedicated worker, WebGPU→WASM fallback |
 | Persistent vector cache | ✅ Model/version/content-hash keyed IndexedDB cache |
-| Graph retrieval | ✅ Reviewed relation/evidence expansion |
+| Graph retrieval | ✅ Reviewed relation/evidence expansion plus broad-intent community retrieval |
 | RRF | ✅ BM25/vector/graph Reciprocal Rank Fusion |
 | Query routing | ✅ Exact / local / multi-hop / global / temporal |
 | Temporal graph constraints | ✅ Common year-window language and reviewed relation validity |
@@ -59,11 +60,12 @@ EvidenceWeave Graph Studio is a local-first knowledge workspace and provenance-f
 | Saved views | ✅ Table/cards/list/Kanban contracts, property grouping and filters |
 | Trash | ✅ Recoverable local note trash |
 | Snapshots | ✅ Manual note snapshots and restore |
-| Portable workspace | ✅ v2 export/restore; v1 migration supported |
+| Workspace state | ✅ Persisted active view/note, open tabs, recent notes, templates and migration records |
+| Portable workspace | ✅ v3 export/restore; v1/v2 migration supported; vectors rebuild on-device |
 | PWA | ✅ Small offline shell; heavy optional runtimes lazy-cached |
 | Evaluation | ✅ Recall@K, MRR, nDCG/path-recall primitives + golden corpus |
 | Scale regression | ✅ Synthetic 5,000-note graph/retrieval test |
-| Browser smoke tests | ✅ Chromium authoring/import/review/retrieval/Canvas/graph flows |
+| Browser smoke tests | ✅ Chromium authoring/import/review/retrieval/Canvas/graph/calendar/template/reload flows |
 | Public static deploy | ✅ GitHub Pages workflow included; repository Pages must be enabled for the first deployment |
 
 ## How GraphRAG works
@@ -172,10 +174,10 @@ The current browser v1 is **not** a certified confidential-document environment.
 
 These are intentionally not disguised as completed features:
 
-- PDF provenance is page/text based; it does not yet preserve bounding-box coordinates for every glyph/region.
+- PDF provenance preserves page identity and extracted text-item bounds where available; it is not a pixel-perfect archival reproduction of every glyph.
 - Claim validation is deterministic citation/lexical support checking, not a trained natural-language-inference verifier.
 - Optional local ML depends on browser/WebGPU/WASM capabilities and third-party model-file availability.
-- The browser app does not yet provide cryptographic model-file integrity pinning.
+- Optional model repositories are pinned to explicit revisions, but EvidenceWeave does not yet independently verify every downloaded model shard against a repository-maintained cryptographic allow-list.
 - Canvas is a practical local spatial workspace, not yet a full vector-drawing/freehand design tool.
 - Tauri desktop packaging, signed native releases, multi-profile enterprise administration and formal at-rest encryption are outside the browser-v1 release.
 - Chromium is the automated browser gate today; broader browser/device matrices are a later hardening layer.
@@ -185,6 +187,7 @@ These are intentionally not disguised as completed features:
 - [`docs/architecture/overview.md`](docs/architecture/overview.md)
 - [`docs/workspace-format.md`](docs/workspace-format.md)
 - [`docs/privacy.md`](docs/privacy.md)
+- [`docs/model-runtime.md`](docs/model-runtime.md)
 - [`docs/decisions/0001-local-first-browser-baseline.md`](docs/decisions/0001-local-first-browser-baseline.md)
 - [`SECURITY.md`](SECURITY.md)
 

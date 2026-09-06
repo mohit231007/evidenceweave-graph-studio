@@ -31,6 +31,17 @@ export async function reviewEntity(record: EntityCandidateRecord, nextStatus: Re
 }
 
 export async function reviewRelation(record: RelationCandidateRecord, nextStatus: ReviewStatus): Promise<RelationCandidateRecord> {
+  if (nextStatus === "accepted") {
+    if (!record.evidenceBlockIds.length) throw new Error("A relationship cannot be accepted without source-block provenance.");
+    const [source, target] = await Promise.all([
+      knowledgeDb.entities.get(record.sourceEntityId),
+      knowledgeDb.entities.get(record.targetEntityId)
+    ]);
+    if (!source || !target) throw new Error("A relationship cannot be accepted when an endpoint entity is missing.");
+    if (source.status !== "accepted" || target.status !== "accepted" || source.mergedIntoId || target.mergedIntoId) {
+      throw new Error("Accept both endpoint entities before accepting this relationship.");
+    }
+  }
   const updated = { ...record, status: nextStatus, updatedAt: now() };
   const action: ReviewAuditRecord["action"] = nextStatus === "accepted" ? "accept" : nextStatus === "rejected" ? "reject" : "reopen";
   await knowledgeDb.transaction("rw", [knowledgeDb.relations, knowledgeDb.reviewAudit], async () => {
@@ -74,6 +85,22 @@ export async function setEntityPinned(record: EntityCandidateRecord, pinned: boo
   return updated;
 }
 
+export function reconcileMergedRelation(left: RelationCandidateRecord, right: RelationCandidateRecord): RelationCandidateRecord {
+  if (left.id !== right.id) throw new Error("Only identical relation identities can be reconciled.");
+  const status: ReviewStatus = left.status === right.status ? left.status : "pending";
+  return {
+    ...left,
+    evidenceBlockIds: [...new Set([...left.evidenceBlockIds, ...right.evidenceBlockIds])],
+    confidence: Math.max(left.confidence, right.confidence),
+    extractorVersion: left.extractorVersion === right.extractorVersion ? left.extractorVersion : "merge-reconciled-v1",
+    status,
+    validFrom: left.validFrom === right.validFrom ? left.validFrom : undefined,
+    validTo: left.validTo === right.validTo ? left.validTo : undefined,
+    observedAt: [left.observedAt, right.observedAt].filter(Boolean).sort()[0] ?? left.observedAt,
+    updatedAt: now()
+  };
+}
+
 export async function mergeEntities(primary: EntityCandidateRecord, secondary: EntityCandidateRecord): Promise<EntityCandidateRecord> {
   if (primary.id === secondary.id) throw new Error("An entity cannot be merged into itself.");
   const updated: EntityCandidateRecord = {
@@ -84,19 +111,41 @@ export async function mergeEntities(primary: EntityCandidateRecord, secondary: E
     updatedAt: now()
   };
   const mergedSecondary: EntityCandidateRecord = { ...secondary, mergedIntoId: primary.id, status: "rejected", updatedAt: now() };
-  const affectedRelations = await knowledgeDb.relations.filter((relation) => relation.sourceEntityId === secondary.id || relation.targetEntityId === secondary.id).toArray();
-  const rewritten = affectedRelations.map((relation) => ({
+  const allRelations = await knowledgeDb.relations.toArray();
+  const affectedRelations = allRelations.filter((relation) => relation.sourceEntityId === secondary.id || relation.targetEntityId === secondary.id);
+  const affectedIds = new Set(affectedRelations.map((relation) => relation.id));
+  const unaffectedById = new Map(allRelations.filter((relation) => !affectedIds.has(relation.id)).map((relation) => [relation.id, relation]));
+  const rewrittenRaw = affectedRelations.map((relation) => ({
     ...relation,
     sourceEntityId: relation.sourceEntityId === secondary.id ? primary.id : relation.sourceEntityId,
     targetEntityId: relation.targetEntityId === secondary.id ? primary.id : relation.targetEntityId,
     id: `${relation.sourceEntityId === secondary.id ? primary.id : relation.sourceEntityId}::${relation.relation}::${relation.targetEntityId === secondary.id ? primary.id : relation.targetEntityId}`,
     updatedAt: now()
   })).filter((relation) => relation.sourceEntityId !== relation.targetEntityId);
+
+  const rewrittenById = new Map<string, RelationCandidateRecord>();
+  for (const relation of rewrittenRaw) {
+    const existing = rewrittenById.get(relation.id) ?? unaffectedById.get(relation.id);
+    rewrittenById.set(relation.id, existing ? reconcileMergedRelation(existing, relation) : relation);
+  }
+  const rewritten = [...rewrittenById.values()];
+  const collidedRelations = [...new Set(rewrittenRaw.map((relation) => relation.id))]
+    .map((id) => unaffectedById.get(id))
+    .filter((relation): relation is RelationCandidateRecord => Boolean(relation));
+
   await knowledgeDb.transaction("rw", [knowledgeDb.entities, knowledgeDb.relations, knowledgeDb.reviewAudit], async () => {
     await knowledgeDb.entities.bulkPut([updated, mergedSecondary]);
-    await knowledgeDb.relations.bulkDelete(affectedRelations.map((relation) => relation.id));
-    await knowledgeDb.relations.bulkPut(rewritten);
-    await knowledgeDb.reviewAudit.add(auditFor(primary, "entity", "merge", primary.status, updated.status, JSON.stringify({ primary, secondary, affectedRelations }), JSON.stringify({ primary: updated, secondary: mergedSecondary, rewritten })));
+    if (affectedRelations.length) await knowledgeDb.relations.bulkDelete(affectedRelations.map((relation) => relation.id));
+    if (rewritten.length) await knowledgeDb.relations.bulkPut(rewritten);
+    await knowledgeDb.reviewAudit.add(auditFor(
+      primary,
+      "entity",
+      "merge",
+      primary.status,
+      updated.status,
+      JSON.stringify({ primary, secondary, affectedRelations, collidedRelations }),
+      JSON.stringify({ primary: updated, secondary: mergedSecondary, rewritten })
+    ));
   });
   return updated;
 }
