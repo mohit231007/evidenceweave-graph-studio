@@ -123,6 +123,7 @@ export default function StudioV2App() {
   const [importJob, setImportJob] = useState<DocumentImportJobSnapshot>();
   const semanticProvider = useRef<EmbeddingProvider | undefined>(undefined);
   const localNerProvider = useRef<LocalNerProvider | undefined>(undefined);
+  const workspaceHydrated = useRef(false);
   const activeImportJob = useRef<DocumentImportJob | undefined>(undefined);
 
   const refresh = async (preferId?: string) => {
@@ -179,10 +180,12 @@ export default function StudioV2App() {
       await refresh(saved.activeNoteId);
       const validViews: MainView[] = ["workspace", "documents", "graph", "review", "evidence", "canvas", "library"];
       if (validViews.includes(saved.activeView as MainView)) setView(saved.activeView as MainView);
+      workspaceHydrated.current = true;
     });
   }, []);
 
   useEffect(() => {
+    if (!workspaceHydrated.current) return;
     void saveWorkspaceState({ activeView: view, activeNoteId: selectedId || undefined });
   }, [view, selectedId]);
 

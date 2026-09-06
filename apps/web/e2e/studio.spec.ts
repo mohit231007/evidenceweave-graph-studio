@@ -136,7 +136,7 @@ test("imports structured evidence in a worker, audits review, reopens decisions,
     buffer: Buffer.from("Microsoft acquired GitHub in 2018. EvidenceWeave keeps provenance for every reviewed relationship.")
   });
   await navButton(page, "Documents").click();
-  await expect(page.getByText("acquisition.txt", { exact: true })).toBeVisible();
+  await expect(page.locator(".document-card").filter({ hasText: "acquisition.txt" })).toBeVisible();
 
   await navButton(page, "Review").click();
   await page.getByRole("button", { name: "Rebuild deterministic", exact: true }).click();
@@ -221,7 +221,7 @@ test("unsupported document input fails closed without creating a source record",
   await input.setInputFiles({ name: "unsafe.exe", mimeType: "application/octet-stream", buffer: Buffer.from([0, 1, 2, 3]) });
   await expect(page.locator(".statusbar")).toContainText("1 failed");
   await navButton(page, "Documents").click();
-  await expect(page.getByText("unsafe.exe", { exact: true })).toHaveCount(0);
+  await expect(page.locator(".document-card").filter({ hasText: "unsafe.exe" })).toHaveCount(0);
 });
 
 test("cancelled worker import commits no partial state and can be resumed", async ({ page }) => {
@@ -234,7 +234,7 @@ test("cancelled worker import commits no partial state and can be resumed", asyn
   await expect(cancel).toBeVisible({ timeout: 10_000 });
   await cancel.click();
   await expect(page.getByRole("button", { name: "Resume import", exact: true })).toBeVisible();
-  await expect(page.getByText("resumable.csv", { exact: true })).toHaveCount(0);
+  await expect(page.locator(".document-card").filter({ hasText: "resumable.csv" })).toHaveCount(0);
   await page.getByRole("button", { name: "Resume import", exact: true }).click();
   await expect(page.locator(".document-card").filter({ hasText: "resumable.csv" })).toBeVisible({ timeout: 45_000 });
 });
