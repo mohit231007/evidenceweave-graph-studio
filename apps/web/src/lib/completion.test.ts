@@ -3,6 +3,7 @@ import { buildBm25IndexCancellable, BM25_INDEX_VERSION } from "./bm25-indexing";
 import { buildDocumentContainment, ingestBytes, MAX_CSV_CELL_CHARS } from "./documents";
 import { blockMatchesTemporal } from "./engine";
 import { bm25IndexFor, bm25RankFromIndex, communityGraphRank, graphCommunities, type UnifiedSourceBlock } from "./hybrid";
+import { browserHasWebGpu, selectLocalModelDevice } from "./runtime-device";
 import { dailyCalendar, dailyTemplateBody, parseDailyTitle, shiftCalendarDate, touchRecentNote } from "./workspace-state";
 import type { NoteRecord } from "./core";
 import type { EntityCandidateRecord, RelationCandidateRecord, WorkspaceStateRecord } from "./store";
@@ -43,6 +44,14 @@ describe("completion hardening", () => {
     const controller = new AbortController();
     controller.abort();
     await expect(buildBm25IndexCancellable(blocks, { signal: controller.signal })).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("selects WebGPU when present and WASM when WebGPU is unavailable", () => {
+    expect(browserHasWebGpu({ gpu: {} })).toBe(true);
+    expect(browserHasWebGpu({})).toBe(false);
+    expect(browserHasWebGpu(undefined)).toBe(false);
+    expect(selectLocalModelDevice(true)).toBe("webgpu");
+    expect(selectLocalModelDevice(false)).toBe("wasm");
   });
 
   it("filters source blocks by mentioned and metadata time", () => {
