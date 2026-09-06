@@ -1,5 +1,5 @@
 import type { NoteRecord } from "./core";
-import { knowledgeDb, type MigrationRecord, type TemplateRecord, type WorkspaceStateRecord } from "./store";
+import { knowledgeDb, type MigrationRecord, type SnapshotRecord, type TemplateRecord, type WorkspaceStateRecord } from "./store";
 import { dailyNoteTitle, expandTemplate } from "./workspace";
 
 export const WORKSPACE_SCHEMA_VERSION = 3;
@@ -105,4 +105,37 @@ export async function recordMigration(fromVersion: number, toVersion: number, re
   };
   await knowledgeDb.migrations.put(record);
   return record;
+}
+
+export async function ensureWorkspaceSchema(notes: NoteRecord[]): Promise<MigrationRecord> {
+  const existing = await knowledgeDb.migrations.orderBy("toVersion").last();
+  if (existing && existing.toVersion >= WORKSPACE_SCHEMA_VERSION) return existing;
+
+  const legacyCounts = await Promise.all([
+    knowledgeDb.documents.count(),
+    knowledgeDb.blocks.count(),
+    knowledgeDb.entities.count(),
+    knowledgeDb.relations.count(),
+    knowledgeDb.canvases.count(),
+    knowledgeDb.views.count(),
+    knowledgeDb.trash.count(),
+    knowledgeDb.snapshots.count(),
+    knowledgeDb.reviewAudit.count(),
+    knowledgeDb.queryTraces.count()
+  ]);
+  const hasLegacyKnowledge = legacyCounts.some((count) => count > 0);
+  let recoverySnapshotId: string | undefined;
+
+  if (hasLegacyKnowledge && notes.length) {
+    const snapshot: SnapshotRecord = {
+      id: crypto.randomUUID(),
+      label: `Automatic pre-v${WORKSPACE_SCHEMA_VERSION} migration recovery`,
+      payload: JSON.stringify(notes),
+      createdAt: new Date().toISOString()
+    };
+    await knowledgeDb.snapshots.put(snapshot);
+    recoverySnapshotId = snapshot.id;
+  }
+
+  return recordMigration(hasLegacyKnowledge ? 2 : 0, WORKSPACE_SCHEMA_VERSION, recoverySnapshotId);
 }
