@@ -1,0 +1,47 @@
+name: Final e2e hydration fix
+
+on:
+  push:
+    branches: [feat/v1-completion-hardening]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: feat/v1-completion-hardening
+      - name: Fix workspace hydration race and scope import assertions
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          app = Path('apps/web/src/StudioV2App.tsx')
+          text = app.read_text()
+          def rep(old, new):
+              global text
+              if old not in text: raise SystemExit(f'missing app marker: {old[:120]!r}')
+              text = text.replace(old, new, 1)
+
+          rep('  const localNerProvider = useRef<LocalNerProvider | undefined>(undefined);\n', '  const localNerProvider = useRef<LocalNerProvider | undefined>(undefined);\n  const workspaceHydrated = useRef(false);\n')
+          rep('''      const validViews: MainView[] = ["workspace", "documents", "graph", "review", "evidence", "canvas", "library"];\n      if (validViews.includes(saved.activeView as MainView)) setView(saved.activeView as MainView);\n    });\n  }, []);\n\n  useEffect(() => {\n    void saveWorkspaceState({ activeView: view, activeNoteId: selectedId || undefined });\n  }, [view, selectedId]);\n''', '''      const validViews: MainView[] = ["workspace", "documents", "graph", "review", "evidence", "canvas", "library"];\n      if (validViews.includes(saved.activeView as MainView)) setView(saved.activeView as MainView);\n      workspaceHydrated.current = true;\n    });\n  }, []);\n\n  useEffect(() => {\n    if (!workspaceHydrated.current) return;\n    void saveWorkspaceState({ activeView: view, activeNoteId: selectedId || undefined });\n  }, [view, selectedId]);\n''')
+          app.write_text(text)
+
+          spec = Path('apps/web/e2e/studio.spec.ts')
+          text = spec.read_text()
+          text = text.replace('await expect(page.getByText("acquisition.txt", { exact: true })).toBeVisible();', 'await expect(page.locator(".document-card").filter({ hasText: "acquisition.txt" })).toBeVisible();', 1)
+          text = text.replace('await expect(page.getByText("unsafe.exe", { exact: true })).toHaveCount(0);', 'await expect(page.locator(".document-card").filter({ hasText: "unsafe.exe" })).toHaveCount(0);', 1)
+          text = text.replace('await expect(page.getByText("resumable.csv", { exact: true })).toHaveCount(0);', 'await expect(page.locator(".document-card").filter({ hasText: "resumable.csv" })).toHaveCount(0);', 1)
+          spec.write_text(text)
+          PY
+      - name: Commit final e2e fix
+        run: |
+          if git diff --quiet; then exit 0; fi
+          git config user.name "EvidenceWeave CI"
+          git config user.email "actions@users.noreply.github.com"
+          git add apps/web/src/StudioV2App.tsx apps/web/e2e/studio.spec.ts
+          git commit -m "fix: preserve hydrated workspace state and scope import assertions"
+          git push origin HEAD:feat/v1-completion-hardening
